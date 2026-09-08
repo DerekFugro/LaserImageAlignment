@@ -1,0 +1,46 @@
+# --- environments and caches (rebuildable, and machine-specific) ---
+# .venv stores ABSOLUTE paths written when it was created, so it cannot work on
+# another machine even if copied. launch.bat detects a foreign one and rebuilds.
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# --- bundled offline wheels (569 MB) ---
+# NOT junk, and NOT optional to understand before deleting them: this folder is
+# what lets launch.bat build the environment with NO INTERNET, and core/geotag.py
+# installs piexif from here when a venv predates it being added to
+# requirements.txt.
+#
+# Kept out of git because GitHub rejects any file over 100 MB and warns over 50,
+# and pyside6_addons alone is ~160 MB - the push would fail partway through.
+# If this repo is cloned somewhere else, either copy wheels/ across by hand or
+# just let uv/pip fetch the same packages from PyPI (which needs internet).
+wheels/
+
+# --- app output, not source ---
+Exports/
+
+# --- editor / OS noise ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# NOTE ON WHAT IS DELIBERATELY *NOT* IGNORED:
+#   lia.ini                    - the per-installation paths. Tracked on purpose
+#                                so a fresh clone gets a documented file to edit
+#                                rather than nothing at all. It carries the
+#                                original machine's F: paths; that is the point,
+#                                and the README says to change them.
+#   uv.lock                    - pins the dependency set; belongs in the repo.
+#   capture_times_20260817.csv - the only surviving record of the original file
+#                                timestamps, which geotagging destroys.
+#
+# Collected data (F:\Sidewalk\099_CollectedData\...) and the calibrations folder
+# live OUTSIDE this folder and are never part of this repo. Nothing from
+# 099_CollectedData, SBGData/ or AllCalibrations/ should ever be committed here.

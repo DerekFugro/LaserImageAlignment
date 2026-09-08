@@ -1,0 +1,17 @@
+# Normalise line endings so a checkout on macOS/Linux does not show every file
+# as modified. Text is stored LF in the repo and checked out native.
+* text=auto
+
+# These MUST stay CRLF on disk or Windows will not run them properly.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.ini text eol=crlf
+
+# launch.sh must stay LF or the shell refuses it with a confusing error.
+*.sh text eol=lf
+
+# Binary - never touch these.
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.whl binary

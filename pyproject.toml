@@ -1,0 +1,24 @@
+[project]
+name = "laserimagealignment"
+version = "0.3.0"
+description = "Align Pave/ROW camera images with Gocator laser profiles and write corrected positions into the deliverables"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "PySide6==6.11.2",
+    "pyqtgraph==0.14.0",
+    "numpy>=2.3,<3",
+    "opencv-python==5.0.0.93",
+    "piexif>=1.1.3,<2",
+    "PyYAML>=6.0,<7",
+    "pytest>=8.0,<9",
+]
+
+# requires-python is pinned to 3.12 on purpose, not out of caution: the
+# bundled wheels\ folder is cp312, and uv will fetch a matching interpreter
+# rather than fail halfway through an offline install.
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
