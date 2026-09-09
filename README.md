@@ -68,6 +68,11 @@ ignored, and does not need to be copied to a new machine.
 The one file the app cannot run without, and the one a person is expected to
 edit. It is plain markdown: a heading, then the numbers under it.
 
+**This README does not state the values, deliberately — open the file.** They
+have changed repeatedly, a number copied out of a document has caused real
+mistakes, and the file is the only thing that decides. The shape, with the
+values shown as placeholders so nothing here can be copied by accident:
+
 ```markdown
 # LaserImageAlignment lever arms
 
@@ -76,31 +81,31 @@ X forward, Y right, Z down.
 
 ## Rear camera
 
-X  -0.866
-Y   0
-Z   0
+X  <metres, negative = behind the IMU>
+Y  <metres, positive = to the right>
+Z  <metres, positive = down>
 
 ## ROW camera
 
-X  -1.00
-Y   0
-Z   0
+X  <...>
+Y  <...>
+Z  <...>
 
 ## Gocator left
 
-X   0
-Y  -0.3575
-Z   0
+X  <...>
+Y  <...>
+Z  <...>
 
 ## Gocator right
 
-X   0
-Y  +0.3575
-Z   0
+X  <...>
+Y  <...>
+Z  <...>
 
 ## Rear
 
-1.719
+<metres above the pavement>
 ```
 
 How headings are read:
@@ -118,16 +123,18 @@ Rules worth knowing before editing it:
 
 - A missing axis line is **0.0**, which is a real claim: it says that sensor
   sits exactly on the IMU in that direction.
-- A unit or a remark after the number is fine — `X -0.866 m`,
-  `X -0.866 (was -0.928)` both parse. (They did not until 2026-09-02; a stray
-  `m` silently turned the arm into 0.0 and stamped the camera at the IMU.)
+- A unit or a remark after the number is fine — `X <value> m` and
+  `X <value> (measured 2026-08-31)` both parse. (They did not until
+  2026-09-02; a stray `m` silently turned the arm into 0.0 and stamped the
+  camera at the IMU.)
 - A camera or laser with **no section** holds its own deliverable back rather
   than being guessed at. A file that parses to nothing at all refuses the run.
 - **A number the parser does not understand is reported, not discarded.** Put a
   value under a heading it does not recognise and the batch report says so on a
   `WARNING:` line. This exists because on 2026-09-04 the heading had been
-  trimmed to `## Rear` when the parser still demanded `## Rear lens height`, so
-  the file said 1.719 while every run quietly used a built-in 1.667.
+  trimmed to `## Rear` when the parser still demanded `## Rear lens height`:
+  the lens height in the file was discarded and every run quietly used the
+  built-in fallback instead, with nothing said anywhere.
 - The file is re-read **every run, never cached** — edit it and the next batch
   uses the new numbers. Which also means editing it between two batches makes
   those batches disagree.
@@ -197,10 +204,8 @@ the rest carry on.
 4. **Browse.** ◀/▶ keys or the slider step through rear images; the Left/Right
    Gocator plots show the profiles covering the same patch of ground
    (the laser scanned it one Rear-arm of travel before the camera passed over
-   it — currently 0.866 m, read from `LaserImageAlignmentLeverArms.md` every
-   run. Do not trust a number quoted in any document, this one included: the
-   arm has been 1.27 → 1.021 → 0.928 → 0.976 → 0.866, and the file is the only
-   thing that decides).
+   it — the arm comes from `LaserImageAlignmentLeverArms.md`, read fresh every
+   run).
 5. **Undistort.** Applies the Pave intrinsic calibration to the displayed
    image. On by default — the ground/pixel model is only exact on the
    undistorted picture — and it drops back to raw, saying so in the badge, for

@@ -170,22 +170,26 @@ You should not need to write this from scratch — it comes in the zip — but y
 may need to read it, and Derek edits it. It is plain markdown: a heading, then
 numbers under it.
 
+**This document does not state the values, deliberately — open the file and
+read it.** They change, and a number copied out of a document has caused real
+mistakes here. The shape, with placeholders in place of the numbers:
+
 ```markdown
 ## Rear camera
 
-X  -0.866
-Y   0
-Z   0
+X  <metres, negative = behind the IMU>
+Y  <metres, positive = to the right>
+Z  <metres, positive = down>
 
 ## Gocator left
 
-X   0
-Y  -0.3575
-Z   0
+X  <...>
+Y  <...>
+Z  <...>
 
 ## Rear
 
-1.719
+<metres above the pavement>
 ```
 
 - Metres from the SBG cover target (the IMU origin). **X forward, Y right,
@@ -200,18 +204,17 @@ Z   0
   only and moves no written position.
 - A missing axis line means **0.0**, which is a claim, not a blank: it says
   that sensor sits exactly on the IMU in that direction.
-- Units or remarks after a number are fine: `X -0.866 m`, `X -0.866 (was
-  -0.928)`.
+- Units or remarks after a number are fine: `X <value> m`,
+  `X <value> (measured 2026-08-31)`.
 
-**Do not hard-code any of these values anywhere.** The Rear arm alone has been
-1.27 → 1.021 → 0.928 → 0.976 → 0.866. The app re-reads the file every run, and
-a number quoted in any document — including this one — is a snapshot. If the
-batch report's `arms:` line and your expectation disagree, the file wins.
+**Do not hard-code any of these values anywhere, and do not ask what they
+should be — read the file.** The app re-reads it every run. If your expectation
+and the batch report's `arms:` line disagree, the file wins.
 
 If the batch report carries a `WARNING:` line about this file, it means a number
 in it sat under a heading the parser did not recognise and was **not** used.
-That is worth stopping for: on 2026-09-04 the file said the lens height was
-1.719 while every run quietly used a built-in 1.667.
+That is worth stopping for: it once left a value sitting in the file, plainly
+visible, while every run quietly used a built-in fallback instead.
 
 ## The data it expects
 

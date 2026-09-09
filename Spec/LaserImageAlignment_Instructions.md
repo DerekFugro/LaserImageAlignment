@@ -1,6 +1,13 @@
 ---
 # Instructions for LaserImageAlignment
 
+> 🚫 **NO LEVER-ARM OR LENS-HEIGHT VALUE IN THIS FILE IS CURRENT.** Every such
+> number below is a dated record of what was believed at the time, kept as
+> provenance. The ONLY source is
+> `LaserImageAlignmentLeverArms.md` in the calibrations folder — open it and
+> read it. Do not copy a value out of this file into code, into another
+> document, or into an answer, and do not ask anyone what the arms should be.
+>
 > This spec is self-contained. The coding agent may have no prior context — every
 > rule here is explicit. Default to the strongest model tier (currently Claude
 > Opus 5) unless a task is explicitly routed lower.

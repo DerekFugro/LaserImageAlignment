@@ -83,13 +83,14 @@ and `tests/test_cli.py` has a test that fails if that ever changes.
   were decoded empirically and are specified in the Instructions. If work ever
   needs SDK/firmware detail beyond file parsing (e.g. live Gocator capture),
   ask Derek to provide the manual first and record it here.
-- The Pave lens height comes FROM THE LEVER-ARM FILE, currently 1.719 m.
-  `PAVE_LENS_HEIGHT_M` = 1.667 m survives only as the fallback for a run with
-  no readable file, and `NOMINAL_LENS_HEIGHT_M` = 1.70 m is the mounting-table
-  figure, kept so the old number stays recognisable. Neither is what the app
-  uses. It is not really a height — it is millimetres-per-pixel expressed as
-  one (height = mm/px × fy), and the mount pitches ~12° in motion, so the
-  physical ~1.65 m is NOT the number to put in the file.
+- The Pave lens height comes FROM THE LEVER-ARM FILE — read it there.
+  `PAVE_LENS_HEIGHT_M` in `core/calibration.py` survives only as the fallback
+  for a run with no readable file, and `NOMINAL_LENS_HEIGHT_M` is the
+  mounting-table figure kept so the old number stays recognisable. Neither is
+  what the app uses; do not quote either as the height. It is not really a
+  height anyway — it is millimetres-per-pixel expressed as one
+  (height = mm/px × fy) — and because the mount pitches ~12° in motion the
+  PHYSICAL height is NOT the number that belongs in the file.
 
 ## Physical calibration references
 
@@ -105,13 +106,14 @@ and `tests/test_cli.py` has a test that fails if that ever changes.
   which IS the IMU origin. `core.alignment.offset_by_lever_arm` is the single
   place that applies one, by heading only. The reference point is 0.400 m
   above the ground.
-  **DO NOT QUOTE THE VALUES — READ THE FILE.** The Rear arm has been
-  1.27 → 1.021 → 0.928 → 0.976 → 0.866, and every stale copy of it in a
-  document has cost somebody an afternoon. As of 2026-09-08 the file says
-  Rear −0.866, ROW −1.00, Gocators ∓0.3575, lens height 1.719. That line will
-  go stale too; the batch report's `arms:` line names the file that was
-  actually used, and the deliverables can be checked directly (Rear↔ROW
-  separation = the difference of their X arms; Gocator L↔R = 715 mm).
+  **DO NOT ASK, DO NOT GUESS, DO NOT COPY A NUMBER FROM ANY DOCUMENT — OPEN
+  THE FILE AND READ IT.** No document in this project states the values, this
+  one included, and that is deliberate: they have changed repeatedly and every
+  stale copy has cost somebody an afternoon. To find out what a given batch
+  actually used, read the `arms:` line at the top of its report (it names the
+  file), or measure it back out of the deliverables — Gocator L↔R is 715 mm
+  (2 × 0.3575, the one pair that has never moved) and Rear↔ROW is the
+  difference of their two X arms, compared at the same trigger or PTP instant.
 - The file format, and what happens to a number the parser does not
   understand, is documented in README.md → **The lever-arm file**. Short
   version: a heading ending in `camera` is a camera keyed by its first word,

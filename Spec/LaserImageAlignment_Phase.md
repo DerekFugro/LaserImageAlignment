@@ -1,6 +1,12 @@
 ---
 # Implementation Plan for LaserImageAlignment
 
+> 🚫 **NO LEVER-ARM OR LENS-HEIGHT VALUE IN THIS FILE IS CURRENT.** Every such
+> number below is what a phase gate was checked against on the day, kept as
+> provenance. The ONLY source is
+> `LaserImageAlignmentLeverArms.md` in the calibrations folder — open it and
+> read it. Do not copy a value out of this file into anything.
+>
 > ✅ **ALL SIX PHASES ARE COMPLETE (2026-09-02). This file is history now, not
 > a to-do list.** It is kept because it records the order the app was built in
 > and the ground-truth numbers each gate was checked against — both still
