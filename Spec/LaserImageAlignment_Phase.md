@@ -31,8 +31,11 @@
 > a whole collection day, write the positions, rename, and report. That is the
 > product. See Amendments A, I and J.
 >
-> State at hand-off: **329 tests + 5 skipped** (the skipped ones need the F:
-> sample data). Branch `camera-lever-arm`.
+> State at hand-off, 2026-09-02: **329 tests + 5 skipped** (the skipped ones
+> need the F: sample data), on a branch called `camera-lever-arm`. Both are
+> history: that git repository was deleted on 2026-09-03, the app now lives in
+> a fresh one with a single `main`, and the suite has grown since. Read the
+> current count from CONTEXT.md, or just run `uv run pytest`.
 
 > *(The original gating rule, as written 2026-08-18:)* Gated phases. After each
 > phase, run the full test suite, report results, and wait for "proceed". Do not

@@ -44,12 +44,22 @@ launch.bat
 ```
 
 `launch.bat` uses uv if it is on `PATH` and falls back to `py -3.12` + a venv +
-pip if it is not — you do not choose, and both work. The zip includes a
-`wheels\` folder, so the install happens **offline** from those files when
-possible. It then opens the GUI.
+pip if it is not — you do not choose, and both work. It then opens the GUI.
 
-On macOS or Linux use `./launch.sh` instead (the GUI works; the Windows-only
-`wheels\` folder is ignored and PySide6 comes from PyPI).
+**You need internet for this step.** The dependencies (PySide6, numpy, OpenCV,
+piexif and a few small ones) come from PyPI. Roughly 300 MB on a first run,
+once; after that the environment is on disk and startup is instant.
+
+There is an offline path, but this package does not use it: if a `wheels\`
+folder is present beside `launch.bat`, the same libraries are installed from
+those files with no network at all. It was left out here because it is ~290 MB
+of binaries and you have internet. If you ever need the offline route — a
+locked-down machine, a field laptop — ask Derek for the `wheels\` folder and
+drop it in; `launch.bat` will find it on its own, no flag to set.
+
+On macOS or Linux use `./launch.sh` instead. The GUI works there; the
+Windows-only `wheels\` folder is ignored either way and PySide6 comes from
+PyPI.
 
 **About `.venv`:** the zip deliberately does not contain one. A virtual
 environment stores absolute paths written when it was created

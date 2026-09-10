@@ -9,15 +9,19 @@ with Gocator laser profiles on a shared PTP-time / distance axis, and **writes
 corrected positions into the deliverables** (GPS EXIF in every camera's JPEGs,
 GPS columns in the Gocator CSVs, plus per-run tables). The viewer is the tool
 for checking the work; the write is the product — see Spec Amendment A.
-State: v0.3, 386 tests + 5 skipped (the skipped ones are the real-data
+State: v0.3, 388 tests + 5 skipped (the skipped ones are the real-data
 integration on run 20260816.110840, which needs the F: sample data).
 
-**Where things are (2026-09-08 — Derek is reorganising, so verify):** the app
+**Where things are (2026-09-09 — Derek is reorganising, so verify):** the app
 is `SidewalkProfilier\002_DataAlignment\LaserImageAlignment`; calibrations are
 `SidewalkProfilier\100_AllCalibrations` and hold ONLY the two files the app
-reads. **The app is not under version control** — no `.git`, no remote, no
-history, deliberately. Every edit is permanent, so say so before changing
-anything, and copy the folder before a large change.
+reads. Git: **`github.com/DerekFugro/LaserImageAlignment`, private**, one
+branch `main`, sole contributor `DerekFugro <dpescod@fugro.com>` — do NOT add
+a `Co-Authored-By` trailer for any AI, Derek asked for that explicitly.
+`wheels/` is gitignored (GitHub rejects files over 100 MB), so a clone needs
+internet to build its environment.
+Stale copies of the app exist elsewhere on the drive; `Moved\` and `BCK*` are
+Derek's own delete folders — leave them alone, they are not your concern.
 Launch with `launch.bat`, or drive it headless with `cli.py` — see README
 "Command line". A CLI is only possible because `core/` has never imported Qt,
 and `tests/test_cli.py` has a test that fails if that ever changes.
