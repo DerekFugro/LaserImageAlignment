@@ -80,7 +80,10 @@ pip install --no-index --find-links wheels -r requirements.txt
 
 ## Step 3 — point the app at AllCalibrations ← do not skip this
 
-**Edit `lia.ini`**, sitting beside `app.py`. Two lines matter:
+**Edit `lia.ini`**, sitting beside `app.py`. If it is not there yet, run
+`launch.bat` once — it copies `lia.ini.example` for you — or copy it yourself.
+(`lia.ini` is deliberately not in git, so your paths never collide with anyone
+else's on a `git pull`.) Two lines matter:
 
 ```ini
 [paths]

@@ -20,6 +20,15 @@ __pycache__/
 # just let uv/pip fetch the same packages from PyPI (which needs internet).
 wheels/
 
+# --- per-installation settings ---
+# lia.ini holds THIS machine's paths. It is deliberately NOT tracked: it was,
+# until 2026-09-10, and that meant anyone who cloned the repo and set their own
+# calibrations folder had a locally-modified tracked file - so every `git pull`
+# afterwards either refused or turned into a merge conflict over a settings
+# file. `lia.ini.example` is the tracked template; the launchers copy it on
+# first run.
+lia.ini
+
 # --- app output, not source ---
 Exports/
 
@@ -32,11 +41,8 @@ desktop.ini
 *~
 
 # NOTE ON WHAT IS DELIBERATELY *NOT* IGNORED:
-#   lia.ini                    - the per-installation paths. Tracked on purpose
-#                                so a fresh clone gets a documented file to edit
-#                                rather than nothing at all. It carries the
-#                                original machine's F: paths; that is the point,
-#                                and the README says to change them.
+#   lia.ini.example            - the template a fresh clone gets. The launchers
+#                                copy it to lia.ini, which IS ignored (above).
 #   uv.lock                    - pins the dependency set; belongs in the repo.
 #   capture_times_20260817.csv - the only surviving record of the original file
 #                                timestamps, which geotagging destroys.

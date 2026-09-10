@@ -17,6 +17,18 @@ rem present (no internet needed) and from PyPI when it is not.
 setlocal
 cd /d "%~dp0"
 
+rem lia.ini holds THIS machine's paths and is NOT in git, so a fresh clone has
+rem only the template. Seed it once, then never touch it again - it is the
+rem user's file from here on, and git will not fight them over it.
+if not exist lia.ini (
+    if exist lia.ini.example (
+        echo First run: creating lia.ini from lia.ini.example.
+        echo EDIT lia.ini and set 'calibrations' to your AllCalibrations folder,
+        echo or every run will be refused with "missing lever_arms".
+        copy /y lia.ini.example lia.ini >nul
+    )
+)
+
 where uv >nul 2>&1 && goto :uv
 
 rem ---------------------------------------------------------------- venv path

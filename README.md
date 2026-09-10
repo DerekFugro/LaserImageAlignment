@@ -36,7 +36,13 @@ The calibrations folder holds `LaserImageAlignmentLeverArms.md`, which is a
 It used to be a constant compiled into `discovery.py`, so on any machine that is
 not the original the app simply did not work and the GUI had no way to say so.
 
-`lia.ini`, beside `app.py`, is the setting. Open it, change the path, save:
+`lia.ini`, beside `app.py`, is the setting. Open it, change the path, save.
+
+**It is not in git — `lia.ini.example` is.** `launch.bat` / `launch.sh` copy the
+template to `lia.ini` on first run and never touch it again, so your paths stay
+yours and `git pull` never argues with you about a settings file. (Running the
+CLI on a fresh clone without ever launching the GUI? `copy lia.ini.example
+lia.ini` by hand, or just set `LIA_CALIBRATIONS`.)
 
 ```ini
 [paths]

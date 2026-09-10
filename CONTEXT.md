@@ -9,7 +9,7 @@ with Gocator laser profiles on a shared PTP-time / distance axis, and **writes
 corrected positions into the deliverables** (GPS EXIF in every camera's JPEGs,
 GPS columns in the Gocator CSVs, plus per-run tables). The viewer is the tool
 for checking the work; the write is the product — see Spec Amendment A.
-State: v0.3, 388 tests + 5 skipped (the skipped ones are the real-data
+State: v0.3, 390 tests + 5 skipped (the skipped ones are the real-data
 integration on run 20260816.110840, which needs the F: sample data).
 
 **Where things are (2026-09-09 — Derek is reorganising, so verify):** the app
@@ -47,7 +47,10 @@ and `tests/test_cli.py` has a test that fails if that ever changes.
 - **Paths are per-installation, in `lia.ini` beside `app.py`** (`core/config.py`
   reads it). `calibrations` is the one that matters: the lever-arm file lives
   there and is required, so a wrong value means `missing lever_arms` on every
-  run. Order: `--calibrations` → `LIA_CALIBRATIONS`/`LIA_COLLECTIONS` env vars
+  run. **`lia.ini` is NOT tracked in git; `lia.ini.example` is** — the
+  launchers copy the template on first run. It was tracked until 2026-09-10,
+  which meant anyone who cloned and set their own paths had a modified TRACKED
+  file and every `git pull` fought them over it. Do not re-add it to git. Order: `--calibrations` → `LIA_CALIBRATIONS`/`LIA_COLLECTIONS` env vars
   → `lia.ini` → the built-in
   `F:\Sidewalk\002_App\SidewalkProfilier\100_AllCalibrations`. Nothing in
   `core/config.py` raises — a bad INI must never stop the app starting.

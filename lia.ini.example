@@ -1,0 +1,31 @@
+; LaserImageAlignment - where THIS installation keeps its folders.
+;
+; ============================ COPY ME =================================
+; This is the template, tracked in git. Your real settings go in
+; `lia.ini` beside it, which is NOT tracked - so your paths are yours,
+; and `git pull` never argues with you about them.
+;
+; `launch.bat` / `launch.sh` copy this to `lia.ini` on first run if one
+; is not there. To do it by hand:      copy lia.ini.example lia.ini
+; ======================================================================
+;
+; Plain text on purpose: open it, change a path, save. The app reads it at
+; startup, and never writes to it.
+;
+; Order, most explicit first: --calibrations  >  the LIA_CALIBRATIONS /
+; LIA_COLLECTIONS environment variables  >  lia.ini  >  a built-in default
+; that points at the machine this was written on and will not exist on yours.
+;
+; `cli.py check --help` prints the folder actually in force and which of
+; those four it came from. Use it when a run says `missing lever_arms`.
+
+[paths]
+
+; REQUIRED in practice: the folder holding LaserImageAlignmentLeverArms.md,
+; without which every run is refused. That file does NOT come from git - it is
+; not part of the app - so get it from Derek and put it wherever you like, then
+; name that folder here.
+calibrations = C:\path\to\AllCalibrations
+
+; Only where the viewer's Open dialog starts. Blank is fine.
+collections = D:\path\to\collections

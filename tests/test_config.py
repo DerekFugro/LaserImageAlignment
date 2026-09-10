@@ -135,14 +135,42 @@ class TestCollections:
         assert config.collections_dir(ini=ini).name == "other"
 
 
-class TestTheShippedIni:
-    """The file that actually travels with the app."""
+class TestTheShippedTemplate:
+    """What actually travels with the app is `lia.ini.example`, NOT `lia.ini`.
 
-    def test_it_exists_and_parses(self):
-        assert config.ini_path().is_file(), \
-            f"{config.INI_NAME} must ship beside app.py - it is how a second " \
-            "machine points the app at its own AllCalibrations folder"
-        assert "calibrations" in config.load()
+    `lia.ini` was tracked in git until 2026-09-10, and that was a mistake: it
+    holds one machine's paths, so anybody who cloned the repo and set their own
+    calibrations folder then had a locally-modified TRACKED file, and every
+    `git pull` afterwards either refused or became a merge conflict over a
+    settings file. The template is tracked; `lia.ini` is ignored and the
+    launchers copy it on first run.
+
+    So this must NOT assert that lia.ini exists - on a fresh clone it does not,
+    and the app is expected to work anyway (falling back through the env vars
+    to the built-in default, which is what the `missing lever_arms` refusal is
+    for)."""
+
+    def test_the_template_ships_and_parses(self):
+        example = config.app_dir() / (config.INI_NAME + ".example")
+        assert example.is_file(), \
+            f"{config.INI_NAME}.example must ship beside app.py - it is the " \
+            "only thing a fresh clone has to tell it where AllCalibrations is"
+        assert "calibrations" in config.load(example), \
+            "the template must carry a [paths] calibrations line to copy"
+
+    def test_the_template_does_not_carry_a_real_machines_paths(self):
+        """It is a template. Shipping somebody's actual drive letters in it
+        invites a clone to run against a path that is not theirs."""
+        text = (config.app_dir() / (config.INI_NAME + ".example")).read_text(
+            encoding="utf-8-sig")
+        assert "F:\\Sidewalk" not in text
+
+    def test_a_missing_lia_ini_is_survivable(self, tmp_path):
+        """A fresh clone has no lia.ini. Nothing may raise."""
+        missing = tmp_path / "not-here.ini"
+        assert config.load(missing) == {}
+        assert config.calibrations_dir(ini=missing) is not None
+        assert config.collections_dir(ini=missing) is None
 
     def test_discovery_resolves_through_config(self, tmp_path, monkeypatch):
         """The whole point: discover_runs(calibrations_dir=None) must not fall

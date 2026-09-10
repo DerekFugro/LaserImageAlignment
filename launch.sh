@@ -8,6 +8,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# lia.ini holds THIS machine's paths and is NOT in git, so a fresh clone has
+# only the template. Seed it once and then leave it alone - it belongs to the
+# user from here on, and git will not fight them over it.
+if [ ! -f lia.ini ] && [ -f lia.ini.example ]; then
+    echo "First run: creating lia.ini from lia.ini.example."
+    echo "EDIT lia.ini and set 'calibrations' to your AllCalibrations folder,"
+    echo "or every run will be refused with 'missing lever_arms'."
+    cp lia.ini.example lia.ini
+fi
+
 if command -v uv >/dev/null 2>&1; then
     exec uv run app.py "$@"
 fi
