@@ -197,8 +197,10 @@ class TestGocatorEncoderMessage:
         assert c.values["terminal_only"] is True
         assert c.values["n_drops"] == 1
         assert c.values["worst_counts"] == -6528 + 100
-        assert "shutdown artifact" in c.message
-        assert "placement is unaffected" in c.message
+        assert "the logger stopping rather than travel" in c.message
+        assert "nothing moves" in c.message
+        # The encoder is a health signal, never a position source.
+        assert c.impact_pct == 0.0
 
     def test_mid_run_drops_are_not_excused(self):
         """Several decreases scattered through a run really are spread."""
@@ -209,7 +211,11 @@ class TestGocatorEncoderMessage:
         c = checks["content.gocator_L_encoder"]
         assert c.values["terminal_only"] is False
         assert c.values["n_drops"] == 3
-        assert "3 encoder decreases, from profile 119 to 309" in c.message
+        # Located in metres into the run, not by profile index: "3 m" is a
+        # place you can drive to, "profile 119" is arithmetic homework.
+        assert "3 of them, between" in c.message
+        assert "m into a" in c.message
+        assert "profile 119" not in c.message
         assert "spread through the run" in c.message
         assert "reverse travel or lost counts" in c.message
 
@@ -225,13 +231,148 @@ class TestGocatorEncoderMessage:
         assert c.values["n_drops"] == 1
         assert c.values["terminal_only"] is False
         assert "spread through the run" not in c.message
-        assert "one encoder decrease, at profile 945 of 1000" in c.message
-        assert "95% through the run" in c.message
-        assert "rather than a trend" in c.message
+        assert "95% through" in c.message
+        assert "profile 945" not in c.message
+        assert "a single step back and nothing else" in c.message
 
     def test_monotonic_encoder_passes(self):
         checks = run_checks(gocator_l=gocator(np.arange(300, dtype=np.int64) * 100))
         assert checks["content.gocator_L_encoder"].severity is Severity.PASS
+
+    def test_one_notch_backwards_is_named_as_a_duplicate_not_a_gap(self):
+        """A step back of exactly one trigger interval is the wheel dithering
+        on a pulse edge while nearly stopped, and it leaves a DUPLICATE scan
+        line. 20260821.130056: -102 counts against a 102-count trigger
+        spacing, the profiles either side 1.2 s apart against ~0.1 s
+        everywhere else, and encoder 3236154 appearing twice."""
+        enc = np.arange(1000, dtype=np.int64) * 102
+        enc[946] -= 102 * 2                   # lands exactly one notch back
+        c = run_checks(gocator_l=gocator(enc))["content.gocator_L_encoder"]
+        assert c.values["one_notch"] is True
+        assert "duplicate scan line" in c.message
+        assert "dithering on a pulse edge" in c.message
+
+
+class TestNoiseSuppression:
+    """Derek, 2026-09-13: "no collection is perfect... the warnings are noise
+    to humans". A finding has to clear BOTH limits to go quiet."""
+
+    def check(self, **kw):
+        from core.qc import QCCheck, Severity as S
+        return QCCheck("x", "x", S.WARN, "m", {}, None, **kw)
+
+    def test_a_tiny_measured_finding_goes_quiet(self):
+        assert self.check(impact_pct=0.08, worst_defect_m=0.36).is_noise
+
+    def test_a_big_percentage_always_speaks(self):
+        assert not self.check(impact_pct=2.0, worst_defect_m=0.1).is_noise
+
+    def test_a_small_percentage_hiding_one_big_hole_still_speaks(self):
+        """THE case the second limit exists for. 1 m missing out of 447 m is
+        0.22% and would pass a percentage-only rule, but it is 1 m of sidewalk
+        with no data that somebody downstream walks into."""
+        assert not self.check(impact_pct=0.22, worst_defect_m=1.0).is_noise
+
+    def test_an_unmeasured_finding_is_never_suppressed(self):
+        """Silence has to be earned by a measurement, not by an omission —
+        otherwise every check that forgets to report impact goes dark."""
+        assert not self.check().is_noise
+        assert not self.check(worst_defect_m=0.1).is_noise
+
+    def test_zero_impact_needs_no_defect_measurement(self):
+        assert self.check(impact_pct=0.0).is_noise
+
+    def test_the_lead_in_is_free_at_any_size(self):
+        """Ahead of the section start, so it is trimmed downstream."""
+        assert self.check(impact_pct=5.0, worst_defect_m=9.0, lead_in=True).is_noise
+
+    def test_a_failure_is_never_noise(self):
+        from core.qc import QCCheck, Severity as S
+        c = QCCheck("x", "x", S.FAIL, "m", {}, None, impact_pct=0.0)
+        assert not c.is_noise
+
+    def test_a_suppressed_finding_is_never_labelled_a_data_impact(self):
+        """If we judged it not to matter, we do not then announce it as
+        "DATA IMPACT: 0.24%". The label follows the DECISION, not the raw
+        number (Derek, 2026-09-13: "You are calling 0.24 percent as data
+        impact you should not"). The figure is still in the message for
+        anyone who wants it."""
+        c = self.check(impact_pct=0.24, worst_defect_m=1.08, lead_in=True)
+        assert c.is_noise
+        assert c.impact_text() == "NO DATA IMPACT"
+        assert "DATA IMPACT:" not in c.impact_text()
+
+    def test_a_real_finding_still_gets_its_number(self):
+        """The two words have to stay worth reading when they do appear."""
+        c = self.check(impact_pct=3.10, worst_defect_m=2.0)
+        assert not c.is_noise
+        assert c.impact_text().startswith("DATA IMPACT: 3.10%")
+
+    def test_the_export_notes_column_carries_only_notable_warnings(self):
+        """That column is repeated on EVERY ROW of the alignment CSV, so a
+        suppressed finding there costs ~580 bytes per image — 400 KB of the
+        same two sentences on 20260821.134240 — in the data file other
+        processes read. And a notes column on every row is about as read as
+        output gets, which is exactly what a no-impact finding must not be."""
+        from core.qc import QCReport, Severity as S
+        r = QCReport("run")
+        r.add("a", "a", S.WARN, "a real hole", impact_pct=9.0, worst_defect_m=4.0)
+        r.add("b", "b", S.WARN, "lead-in startup lag", impact_pct=0.3,
+              worst_defect_m=1.2, lead_in=True)
+        assert r.notes() == "a: a real hole"
+        assert "lead-in" not in r.notes()
+
+    def test_warned_still_holds_everything(self):
+        """The two lists must always add up — issues.csv depends on it."""
+        from core.qc import QCReport, Severity as S
+        r = QCReport("run")
+        r.add("a", "a", S.WARN, "loud", impact_pct=9.0, worst_defect_m=4.0)
+        r.add("b", "b", S.WARN, "quiet", impact_pct=0.0)
+        assert len(r.warned) == 2
+        assert [c.check_id for c in r.notable] == ["a"]
+        assert [c.check_id for c in r.suppressed] == ["b"]
+
+
+class TestSharedDmiMerge:
+    """Both Gocators are fed the same DMI pulses off a Y-split, so one wheel
+    event was being reported twice and read like two faults (Derek,
+    2026-09-13: "both lasers get the same DMI pulses it is a y connector?")."""
+
+    def both_sides(self, enc_l, enc_r):
+        return run_checks(gocator_l=gocator(enc_l), gocator_r=gocator(enc_r))
+
+    def test_the_same_event_on_both_lasers_becomes_one_finding(self):
+        enc = np.arange(1000, dtype=np.int64) * 102
+        enc[946] -= 204
+        # The two sensors start logging a moment apart, which is the ONLY
+        # reason the profile index differed — the encoder value is identical.
+        checks = self.both_sides(enc, enc.copy())
+        assert "content.dmi_encoder" in checks
+        assert "content.gocator_L_encoder" not in checks
+        assert "content.gocator_R_encoder" not in checks
+        assert checks["content.dmi_encoder"].values["sides"] == "L+R"
+        assert "one wheel event and not two faults" in checks["content.dmi_encoder"].message
+
+    def test_sides_that_disagree_are_kept_apart(self):
+        """One encoder feed misbehaving on its own is a DIFFERENT fault and
+        has to stay visible as two rows."""
+        enc_l = np.arange(1000, dtype=np.int64) * 102
+        enc_r = enc_l.copy()
+        enc_l[946] -= 204
+        enc_r[500] -= 204                     # different place entirely
+        checks = self.both_sides(enc_l, enc_r)
+        assert "content.dmi_encoder" not in checks
+        assert checks["content.gocator_L_encoder"].severity is Severity.WARN
+        assert checks["content.gocator_R_encoder"].severity is Severity.WARN
+
+    def test_one_clean_side_is_not_merged(self):
+        enc_l = np.arange(1000, dtype=np.int64) * 102
+        enc_r = enc_l.copy()
+        enc_l[946] -= 204                     # only the left misbehaves
+        checks = self.both_sides(enc_l, enc_r)
+        assert "content.dmi_encoder" not in checks
+        assert checks["content.gocator_L_encoder"].severity is Severity.WARN
+        assert checks["content.gocator_R_encoder"].severity is Severity.PASS
 
 
 class TestTriggerDropouts:

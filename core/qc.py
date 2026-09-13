@@ -43,7 +43,60 @@ TARGETS = (TARGET_IMAGES, TARGET_GOCATOR_L, TARGET_GOCATOR_R, TARGET_CSV)
 # 1.16 m, and the right consistently started 1.38 s +-0.62 after the left.
 # Derek set this limit at 1.0 m (2026-08-31) so that lag stays visible while
 # it is being chased.
+#
+# 2026-09-13: Derek says that lag is settled, so this check is no longer
+# exempt from the noise rule below — it still MEASURES in metres (the reason
+# below stands: a startup delay is the same physical size whatever the section
+# length), but a finding under both noise limits no longer reaches the human
+# report. It is still written to issues.csv every time. If the lasers start
+# drifting late again the defect grows past NOISE_MAX_DEFECT_M and it speaks
+# up on its own.
 GOCATOR_MAX_MISSING_M = 1.0
+
+# How small a defect has to be before it is noise to a human reader.
+#
+# Derek, 2026-09-13: "no collection is perfect... the warnings are noise to
+# humans". He is right — a batch that prints five warnings and means "0.08% of
+# one run is missing its right laser" has trained its reader to skim.
+#
+# TWO tests, not one, and a finding has to pass BOTH to go quiet. A percentage
+# on its own hides a single large hole: 1 m missing in the middle of a 447 m
+# run is 0.22% and would vanish, but it is 1 m of sidewalk that somebody
+# downstream will walk into. Forty scattered single profiles are the same
+# 0.22% and are genuinely nothing. Same number, different problem — so the
+# second test is the size of the single worst unbroken defect.
+#
+# These two values are judgement, not measurement. Revisit them once a few
+# more collections have gone through.
+NOISE_MAX_PCT = 0.5
+NOISE_MAX_DEFECT_M = 0.5
+
+# THE RULE THIS SERVES, stated so a later change cannot undo it by accident:
+#
+#     No data impact, no record in the human report. Not the finding, not a
+#     count of findings, not a line explaining why there is no finding.
+#
+# Derek, 2026-09-13: "no impact no record. Humans do not need noise. what will
+# happen is they will stop looking at the data if you report issue that are not
+# issues. Over reporting to humans is really bad."
+#
+# The failure mode is not a cluttered report. It is a reader who has learned
+# that this report cries wolf, and who therefore skims past the one line that
+# mattered. Every non-issue printed spends a little of the attention the real
+# warning will need. That cost is invisible in any single batch, which is why
+# it has to be written down rather than re-derived.
+#
+# Two consequences that keep getting reinvented, so: do not.
+#   1. A suppressed finding produces NO output a person reads — including
+#      helpful-sounding summaries like "3 findings held back, see the CSV".
+#      An explanation of silence is not silence.
+#   2. A suppressed finding is never labelled with an impact figure. If we
+#      judged it not to matter, we do not then announce it as "DATA IMPACT:
+#      0.24%". See QCCheck.impact_text.
+#
+# None of this loses anything: issues.csv still records every finding, and
+# that is what downstream tools read. The two audiences are separate on
+# purpose — the machine gets everything, the person gets what they must act on.
 
 # How far the SBG must have travelled before the run counts as under way.
 # Used to skip a stall at the head of the trigger window (see below). It is
@@ -84,6 +137,59 @@ class QCCheck:
     # Gocator at all (Derek, 2026-08-26 — run 20260824.101724, where 59 bad
     # profiles at the start of R blocked 76 perfectly good images).
     blocks: tuple = None
+    # How much of the deliverable this finding actually costs, and how big its
+    # single worst unbroken defect is. None means "this check has not worked
+    # out its impact" — those are never suppressed, because silence has to be
+    # earned by a measurement, not by an omission.
+    impact_pct: float | None = None
+    worst_defect_m: float | None = None
+    # Sits in the lead-in, ahead of the section start. Trimmed downstream, so
+    # it costs the client nothing whatever its size.
+    lead_in: bool = False
+
+    @property
+    def is_noise(self) -> bool:
+        """Too small to be worth a human's attention. Never applies to a
+        FAIL — a blocked deliverable is always worth saying out loud, however
+        little of the run it represents."""
+        if self.severity != Severity.WARN:
+            return False
+        if self.lead_in:
+            return True
+        if self.impact_pct is None:
+            return False
+        if self.impact_pct > NOISE_MAX_PCT:
+            return False
+        # A percentage alone hides one big hole, so the worst single defect
+        # has to be small too. Unmeasured defect size means not suppressed.
+        if self.worst_defect_m is None:
+            return self.impact_pct == 0.0
+        return self.worst_defect_m <= NOISE_MAX_DEFECT_M
+
+    def impact_text(self) -> str:
+        """The first thing a reader needs: does this touch my data, and by
+        how much. Everything else in the message is detail.
+
+        THE LABEL FOLLOWS THE DECISION, NOT THE RAW NUMBER. A finding we have
+        already judged to be noise does not get billed as "DATA IMPACT: 0.24%"
+        — saying that in the same breath as suppressing it is a contradiction,
+        and it is over-reporting of exactly the kind this whole mechanism
+        exists to stop (Derek, 2026-09-13: "You are calling 0.24 percent as
+        data impact you should not"). The measurement is not lost: the message
+        itself still carries the figure for anyone who wants it.
+
+        So "DATA IMPACT" appears ONLY on a finding that survived suppression.
+        That is what makes those two words worth reading when they do appear.
+        """
+        if self.is_noise:
+            return "NO DATA IMPACT"
+        if self.impact_pct is None:
+            return "DATA IMPACT: not measured"
+        if self.impact_pct == 0.0:
+            return "NO DATA IMPACT"
+        extra = f", worst single defect {self.worst_defect_m:.2f} m" \
+            if self.worst_defect_m else ""
+        return f"DATA IMPACT: {self.impact_pct:.2f}% of the run{extra}"
 
 
 @dataclass
@@ -92,8 +198,11 @@ class QCReport:
     checks: list[QCCheck] = field(default_factory=list)
 
     def add(self, check_id: str, name: str, severity: Severity, message: str,
-            blocks: tuple = None, **values) -> QCCheck:
-        c = QCCheck(check_id, name, severity, message, values, blocks)
+            blocks: tuple = None, impact_pct: float = None,
+            worst_defect_m: float = None, lead_in: bool = False,
+            **values) -> QCCheck:
+        c = QCCheck(check_id, name, severity, message, values, blocks,
+                    impact_pct, worst_defect_m, lead_in)
         self.checks.append(c)
         return c
 
@@ -103,7 +212,22 @@ class QCReport:
 
     @property
     def warned(self) -> list[QCCheck]:
+        """EVERY warning, noise included. This is the machine's view — it
+        feeds issues.csv, and nothing is ever dropped from it."""
         return [c for c in self.checks if c.severity == Severity.WARN]
+
+    @property
+    def notable(self) -> list[QCCheck]:
+        """The warnings worth a human's time. This is what the batch report
+        prints. A report that stays quiet is then worth something, because it
+        stayed quiet on purpose."""
+        return [c for c in self.warned if not c.is_noise]
+
+    @property
+    def suppressed(self) -> list[QCCheck]:
+        """Warnings held back as noise. Not discarded — issues.csv still
+        carries them, flagged, so the count is always reconcilable."""
+        return [c for c in self.warned if c.is_noise]
 
     def blocked_targets(self) -> set:
         """Which deliverables must NOT be written, given the failures."""
@@ -124,7 +248,19 @@ class QCReport:
         return TARGET_CSV in self.blocked_targets()
 
     def notes(self) -> str:
-        return "; ".join(f"{c.check_id}: {c.message}" for c in self.warned)
+        """The alignment CSV's `notes` column — NOTABLE warnings only.
+
+        This text is repeated on EVERY ROW of the export, so anything put here
+        is paid for once per image. On 20260821.134240 the suppressed findings
+        added ~580 bytes to each of 685 rows: 400 KB of the same two sentences,
+        in the data file other processes read (found 2026-09-13).
+
+        Size is the smaller half of it. The rule is that a finding judged to
+        have no data impact produces no output a person reads, and a notes
+        column on every row of the deliverable is about as read as output
+        gets. Suppressed findings live in issues.csv and nowhere else.
+        """
+        return "; ".join(f"{c.check_id}: {c.message}" for c in self.notable)
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +563,50 @@ def check_acs_qc_video(pr: ParsedRun, report: QCReport,
                    "two systems rounding differently.", **vals)
 
 
+def merge_shared_dmi(report: QCReport) -> None:
+    """Both Gocators are fed the same DMI pulses off a Y-split, so one wheel
+    event is reported twice — once per sensor — and reads like two faults.
+
+    Confirmed on 20260821.130056 (Derek, 2026-09-13, "both lasers get the same
+    DMI pulses it is a y connector?"): L and R both stepped -102 counts at the
+    SAME encoder value 3236154, 34 microseconds apart, and across the run the
+    two encoder readings never differed by more than one count at a shared
+    timestamp. The two findings differed only in profile index, because the
+    sensors start logging a moment apart — which is exactly what made it look
+    like two problems.
+
+    Collapse the pair into one DMI finding. If the two sides disagree about
+    what happened, they are NOT merged: that would be a genuinely different
+    fault (one encoder feed misbehaving on its own) and it must stay visible
+    as two rows.
+    """
+    by_id = {c.check_id: c for c in report.checks}
+    left = by_id.get("content.gocator_L_encoder")
+    right = by_id.get("content.gocator_R_encoder")
+    if left is None or right is None:
+        return
+    if left.severity != Severity.WARN or right.severity != Severity.WARN:
+        return
+    le, re_ = left.values.get("drop_encoders"), right.values.get("drop_encoders")
+    if not le or not re_ or set(le) != set(re_):
+        return          # different events per side — a real asymmetry, keep both
+    if left.values.get("worst_counts") != right.values.get("worst_counts"):
+        return
+    merged = QCCheck(
+        "content.dmi_encoder", "DMI encoder",
+        Severity.WARN,
+        left.message.replace("wheel encoder", "wheel encoder (shared DMI)", 1)
+        + " Seen identically on both lasers, which share the DMI feed, so this"
+          " is one wheel event and not two faults.",
+        dict(left.values, sides="L+R"),
+        None, left.impact_pct, left.worst_defect_m, left.lead_in,
+    )
+    # Identity, not equality: QCCheck is a plain dataclass, so `!=` compares
+    # field by field and could drop an unrelated check that happens to match.
+    report.checks = [c for c in report.checks if c is not left and c is not right]
+    report.checks.append(merged)
+
+
 def check_content(pr: ParsedRun, report: QCReport,
                   triggers: TriggerData | None = None,
                   ptp_l: PtpOffsetResult | None = None,
@@ -706,31 +886,57 @@ def check_content(pr: ParsedRun, report: QCReport,
             # WHERE the decreases are, not a two-way verdict about them.
             # This used to print "1 encoder decrease(s) ... spread through the
             # run", which is a contradiction: one event is somewhere, it is not
-            # spread. 20260821.130056 said exactly that about a single -102
-            # count step at profile 18435 of 19479, and a single 24 mm step
-            # back at 95% of a run is a different thing to investigate than a
-            # scattering of them.
+            # spread.
+            #
+            # And distance into the run beats a profile index every time.
+            # "440 m into a 465 m run" is a place you can drive to; "profile
+            # 18435 of 19479" is a number the reader has to do arithmetic on
+            # (Derek, 2026-09-13: "the warnings are hard to understand").
+            span_m = float(int(goc.encoder[-1]) - int(goc.encoder[0])) / GOCATOR_COUNTS_PER_M
+            at_m = span_m * first / max(len(de), 1)
             if len(drops) == 1:
-                where = (f"one encoder decrease, at profile {first} of {len(goc)} "
-                         f"({100.0 * first / max(len(de), 1):.0f}% through the run)")
+                where = (f"at {at_m:.0f} m into a {span_m:.0f} m run "
+                         f"({100.0 * first / max(len(de), 1):.0f}% through)")
             else:
-                where = (f"{len(drops)} encoder decreases, from profile {first} to "
-                         f"{last} of {len(goc)}")
-            msg = (f"{where}; largest {worst} counts "
-                   f"(~{abs(worst) / GOCATOR_COUNTS_PER_M * 1000:.0f} mm)")
+                where = (f"{len(drops)} of them, between {at_m:.0f} m and "
+                         f"{span_m * last / max(len(de), 1):.0f} m into a "
+                         f"{span_m:.0f} m run")
+            # One trigger interval backwards is the signature of the wheel
+            # dithering across a pulse edge while the vehicle is nearly
+            # stopped, not of the vehicle rolling back: a real roll-back is
+            # some arbitrary distance, this is exactly one notch. Verified on
+            # 20260821.130056, where the profile either side of the step was
+            # 1.2 s apart against ~0.1 s everywhere else, and the same encoder
+            # value appears twice (Derek + Claude, 2026-09-13).
+            notch = int(round(np.median(de[de > 0]))) if np.any(de > 0) else 0
+            one_notch = notch and abs(abs(worst) - notch) <= 1
             if terminal_only:
-                msg += (" — on the final profiles, so a logger-shutdown artifact "
-                        "rather than travel")
+                why = "on the final profiles, so the logger stopping rather than travel"
+            elif one_notch:
+                why = ("exactly one trigger notch backwards, which is the wheel "
+                       "dithering on a pulse edge while nearly stopped — it "
+                       "leaves a duplicate scan line, not a gap")
             elif len(drops) == 1:
-                msg += (" — one step back and nothing else, so a lost count or a "
-                        "momentary reverse rather than a trend")
+                why = "a single step back and nothing else, so a lost count"
             else:
-                msg += (" — spread through the run, so check for reverse travel "
-                        "or lost counts")
-            msg += ". Profile positions come from PTP time, not the encoder, so placement is unaffected."
+                why = "spread through the run, so check for reverse travel or lost counts"
+            dupes = len(drops) if one_notch else 0
+            msg = (f"wheel encoder ticked backwards {where}; largest {worst} counts "
+                   f"(~{abs(worst) / GOCATOR_COUNTS_PER_M * 1000:.0f} mm) — {why}. "
+                   f"Profile positions come from PTP time, not the encoder, so "
+                   f"nothing moves"
+                   + (f"; leaves {dupes} duplicate scan line(s) out of {len(goc)}."
+                      if dupes else "."))
             report.add(f"content.gocator_{side}_encoder", f"Gocator {side} encoder",
-                       Severity.WARN, msg, n_drops=len(drops), worst_counts=worst,
-                       terminal_only=terminal_only)
+                       Severity.WARN, msg,
+                       # The encoder is a health signal, not a position source.
+                       # Whatever it does, the deliverable is untouched.
+                       impact_pct=0.0, worst_defect_m=0.0,
+                       n_drops=len(drops), worst_counts=worst,
+                       terminal_only=terminal_only, one_notch=bool(one_notch),
+                       # for the L/R merge: the same DMI event lands on both
+                       # sensors at the same encoder value
+                       drop_encoders=[int(goc.encoder[i + 1]) for i in drops[:8]])
         else:
             report.add(f"content.gocator_{side}_encoder", f"Gocator {side} encoder",
                        Severity.PASS, "encoder monotonic")
@@ -767,11 +973,25 @@ def check_content(pr: ParsedRun, report: QCReport,
                     where.append(f"{lead_m:.2f} m at the start")
                 if tail_m > 0.01:
                     where.append(f"{tail_m:.2f} m at the end")
+                # The percentage is for the READER's sense of scale; the metre
+                # limit above is still what decides PASS/WARN, for the reason
+                # argued at GOCATOR_MAX_MISSING_M. Two different jobs.
+                run_m = float(triggers.dist_m[-1]) - float(triggers.dist_m[0])
+                pct = 100.0 * missing / run_m if run_m > 0 else None
+                # A loss entirely at the head of the run sits in the lead-in,
+                # ahead of the section start, and is trimmed downstream — so it
+                # costs the client nothing no matter how it measures. A loss at
+                # the TAIL is inside the section and is never free.
+                in_lead_in = bool(tail_m <= 0.01 and lead_m > 0.0)
                 report.add(
                     f"content.gocator_{side}_coverage", f"Gocator {side} section coverage", sev,
                     (f"no profiles for {' and '.join(where)} of the run "
                      f"(limit {GOCATOR_MAX_MISSING_M:.1f} m)"
+                     + (f"; that is {pct:.2f}% of {run_m:.0f} m" if pct is not None else "")
+                     + (" and it falls in the lead-in, ahead of the section "
+                        "start, so it is trimmed downstream" if in_lead_in else "")
                      if where else "profiles span the whole run"),
+                    impact_pct=pct, worst_defect_m=missing, lead_in=in_lead_in,
                     missing_m=missing, lead_m=lead_m, tail_m=tail_m,
                 )
 
@@ -829,6 +1049,8 @@ def check_content(pr: ParsedRun, report: QCReport,
                 blocks=(f"gocator_{side}",),
                 n_outside=n_out,
             )
+
+    merge_shared_dmi(report)
 
     # Calibration sanity
     if pr.calibration is not None:
