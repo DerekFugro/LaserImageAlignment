@@ -90,10 +90,14 @@ class TestItWritesWhatTheGuiWrites:
         after = sorted(p.name for p in cam.glob("*.jpg"))
         assert after != before, "the batch renames every placed image"
         assert (cam / "rename_manifest.csv").is_file()
-        proc = synth_run_root / "Processed"
+        proc = synth_run_root / "Processed" / "Alignment"
         assert (proc / "run_mapping.csv").is_file()
         assert list(proc.glob("batch_report_*.txt"))
-        assert list((synth_run_root / "Exports").glob("*_alignment.csv"))
+        # The alignment table lands with the batch records, not in a root
+        # Exports/ folder — a collection root already has ExportBakFiles,
+        # ExportDataFiles and ExportLogs from ACS (Derek, 2026-09-13).
+        assert list(proc.glob("*_alignment.csv"))
+        assert not (synth_run_root / "Exports").exists()
 
 
 class TestDryRun:
@@ -122,7 +126,8 @@ class TestDryRun:
         daily(synth_run_root)
         run_cli(["process", str(synth_run_root), "--no-images", "--no-gocator",
                  "--no-csv"], tmp_path, synth_cal_dir)
-        assert list((synth_run_root / "Processed").glob("batch_report_*.txt"))
+        assert list((synth_run_root / "Processed" / "Alignment")
+                    .glob("batch_report_*.txt"))
 
     def test_the_saved_report_does_not_claim_it_wrote_anything(
             self, synth_run_root, synth_cal_dir, tmp_path):
@@ -133,7 +138,7 @@ class TestDryRun:
         daily(synth_run_root)
         run_cli(["process", str(synth_run_root), "--no-images", "--no-gocator",
                  "--no-csv"], tmp_path, synth_cal_dir)
-        text = next((synth_run_root / "Processed")
+        text = next((synth_run_root / "Processed" / "Alignment")
                     .glob("batch_report_*.txt")).read_text(encoding="utf-8")
         assert "DRY RUN" in text
         assert "every deliverable was written" not in text

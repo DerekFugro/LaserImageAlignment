@@ -200,6 +200,12 @@ class RunOutcome:
     csv_path: str = ""
     failures: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Warnings too small to be worth a person's attention (see qc.QCCheck.
+    # is_noise). Kept, not dropped: they go to issues.csv as severity NOISE so
+    # a downstream database still sees every event, while the batch report a
+    # human reads stays quiet. Derek, 2026-09-13: "the warnings are noise to
+    # humans".
+    suppressed: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     result: RunResult | None = None
     # camera -> RenameOutcome, filled by the rename step at the end of the
@@ -307,6 +313,13 @@ class BatchReport:
                 cid, detail = _split_check(msg)
                 rows.append({"run_id": o.run_id, "run_status": o.status,
                              "severity": "WARN", "check_id": cid, "detail": detail})
+            # Suppressed as noise for the human report, but still a row here.
+            # This file is the machine's view and it is complete: WARN + NOISE
+            # is always the full set of warnings the QC layer raised.
+            for msg in o.suppressed:
+                cid, detail = _split_check(msg)
+                rows.append({"run_id": o.run_id, "run_status": o.status,
+                             "severity": "NOISE", "check_id": cid, "detail": detail})
             for target, reason in sorted(o.held.items()):
                 rows.append({"run_id": o.run_id, "run_status": o.status,
                              "severity": "HELD", "check_id": target,
@@ -445,6 +458,20 @@ class BatchReport:
                 lines.append(f"         FAIL: {f}")
             for w in o.warnings:
                 lines.append(f"         warn: {w}")
+            # NOTHING here about suppressed findings — not a count, not a
+            # reason, not a pointer to the CSV.
+            #
+            # There was a line here saying "N finding(s) held back as NOISE".
+            # Derek killed it (2026-09-13): "no impact no record. Humans do not
+            # need noise. what will happen is they will stop looking at the
+            # data if you report issue that are not issues."
+            #
+            # That is the whole point and it is easy to lose: a line explaining
+            # why there is nothing to report IS something to read, and it costs
+            # the same attention as a real warning. A reader who meets four of
+            # them per batch learns to skip that part of the report, and then
+            # skips the real one when it comes. The suppressed findings are in
+            # issues.csv, which is where the machine reads them.
             for n in o.notes:
                 lines.append(f"         note: {n}")
             if o.csv_path:
@@ -483,6 +510,18 @@ AFFECTED_COLUMNS = ["run_id", "target", "run_status", "reason", "files_affected"
 # beside the images it describes, because it is how those files are read back
 # and undone.
 PROCESSED_DIR = "Processed"
+# ...and inside it, a folder of our own. `Processed/` is a shared name: any
+# other process that writes a collection's outputs lands in the same pile, and
+# then nobody can tell whose file is whose. Everything this app writes goes
+# under Processed/Alignment/ (Derek, 2026-09-13).
+#
+# THIS MOVES run_mapping.csv TOO, and other processes read that file — see its
+# comment below. Derek chose to move it with the rest rather than leave it
+# behind, so anything pointed at Processed/run_mapping.csv has to be repointed
+# at Processed/Alignment/run_mapping.csv. Reports already sitting in the old
+# location are left exactly where they are: the app writes to the new place
+# from now on and never rearranges files it was not asked to touch.
+ALIGNMENT_DIR = "Alignment"
 ISSUE_COLUMNS = ["run_id", "run_status", "severity", "check_id", "detail"]
 
 # One row per ACS run, for OTHER processes.
@@ -527,8 +566,13 @@ MAPPING_COLUMNS = [
 
 
 def processed_dir(root) -> Path:
-    """<root>/Processed, created on demand."""
-    d = Path(root) / PROCESSED_DIR
+    """<root>/Processed/Alignment, created on demand.
+
+    The one place this app writes batch records. Every caller goes through
+    here rather than joining the names itself, which is why moving the outputs
+    under Alignment/ was a one-line change.
+    """
+    d = Path(root) / PROCESSED_DIR / ALIGNMENT_DIR
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -685,7 +729,7 @@ def write_run_mapping_csv(report: "BatchReport", out_path: Path) -> Path:
 
 
 def write_reports(report: "BatchReport") -> dict:
-    """Write every record of this batch into <root>/Processed.
+    """Write every record of this batch into <root>/Processed/Alignment.
 
     Returns {kind: path}. Nothing here raises: a batch that produced results
     must not lose them because one file could not be written, so each failure
@@ -696,7 +740,7 @@ def write_reports(report: "BatchReport") -> dict:
     try:
         d = processed_dir(report.root)
     except OSError as exc:
-        return {"error": f"could not create {PROCESSED_DIR}/: {exc}"}
+        return {"error": f"could not create {PROCESSED_DIR}/{ALIGNMENT_DIR}/: {exc}"}
     jobs = [("report", f"batch_report_{stamp}.txt",
              lambda p: p.write_text(report.to_text(), encoding="utf-8")),
             ("issues", f"issues_{stamp}.csv",
@@ -705,6 +749,10 @@ def write_reports(report: "BatchReport") -> dict:
             # changes every batch is a name nothing can be pointed at. It is
             # a statement of the collection's current shape, so the latest
             # batch's answer is the only one that is true.
+            #
+            # Its FOLDER changed on 2026-09-13 — it now sits in
+            # Processed/Alignment/ with the rest. The name is still the stable
+            # part; the path a reader is pointed at had to be updated once.
             ("mapping", "run_mapping.csv",
              lambda p: write_run_mapping_csv(report, p))]
     if report.affected_rows():
@@ -968,7 +1016,14 @@ def _process_one(run: disc.RunPaths, write_images: bool, write_gocator: bool,
         return out
     out.result = result
     out.failures = [f"{c.check_id}: {c.message}" for c in result.report.failed]
-    out.warnings = [f"{c.check_id}: {c.message}" for c in result.report.warned]
+    # Two audiences, one set of findings. `warnings` is what a person reads in
+    # the batch report, so it carries only what is worth their attention;
+    # `suppressed` is everything held back as noise. Nothing is discarded —
+    # issues.csv writes both, and the two lists always add up to report.warned.
+    out.warnings = [f"{c.check_id}: {c.impact_text()} — {c.message}"
+                    for c in result.report.notable]
+    out.suppressed = [f"{c.check_id}: {c.impact_text()} — {c.message}"
+                      for c in result.report.suppressed]
 
     # A failure now stops only what it actually invalidates. A run where one
     # laser's clock failed still gets its images, its export CSV and its good
@@ -1087,7 +1142,18 @@ def _process_one(run: disc.RunPaths, write_images: bool, write_gocator: bool,
         out.held[TARGET_CSV] = why(TARGET_CSV)
     elif write_csv:
         try:
-            dest = Path(run.root) / "Exports" / f"{run.run_id}_alignment.csv"
+            # Was <root>/Exports/. Moved 2026-09-13 (Derek) into the same
+            # folder as the batch records, so EVERYTHING this app writes about
+            # a collection is in one place and there is one path to point a
+            # downstream tool at.
+            #
+            # The old name was the problem: a collection root already holds
+            # ExportBakFiles, ExportDataFiles and ExportLogs from ACS, so
+            # "Exports" was a fourth Export* folder and the only one that was
+            # ours. THIS IS THE FILE OTHER PROCESSES ACTUALLY READ - one row
+            # per image with its position - so the move has to be announced,
+            # not discovered.
+            dest = processed_dir(run.root) / f"{run.run_id}_alignment.csv"
             out.csv_path = str(export_csv(result, dest))
         except Exception as exc:
             out.ok = False

@@ -443,16 +443,81 @@ class TestIssueLog:
 
     def test_reports_go_to_processed_and_the_folder_is_created(self, workdir,
                                                                synth_cal_dir, tmp_path):
-        from core.batch import PROCESSED_DIR, write_reports
+        """Everything this app writes goes under Processed/Alignment/, not
+        loose in Processed/ — that name is shared with whatever else writes a
+        collection's outputs (Derek, 2026-09-13)."""
+        from core.batch import ALIGNMENT_DIR, PROCESSED_DIR, write_reports
         store = OverrideStore(tmp_path / "ov.json")
         report = process_collection(workdir, calibrations_dir=synth_cal_dir,
                                     overrides=store)
-        assert not (workdir / PROCESSED_DIR).exists()      # not made until asked
+        d = workdir / PROCESSED_DIR / ALIGNMENT_DIR
+        # The folder now exists BEFORE write_reports, because the alignment
+        # CSV moved in here too (2026-09-13) and the batch writes that during
+        # processing. It used to be created only when reports were asked for;
+        # that assertion has been replaced rather than deleted, so the change
+        # in when the folder appears is recorded rather than silently lost.
+        assert d.is_dir(), "processing writes the alignment CSV here"
+        assert list(d.glob("*_alignment.csv"))
         written = write_reports(report)
-        d = workdir / PROCESSED_DIR
-        assert d.is_dir()
         assert not [k for k in written if k.startswith("error")], written
         assert list(d.glob("batch_report_*.txt")) and list(d.glob("issues_*.csv"))
+        # Nothing left loose in the shared parent.
+        assert not list((workdir / PROCESSED_DIR).glob("*.txt"))
+        assert not list((workdir / PROCESSED_DIR).glob("*.csv"))
+
+    def test_a_suppressed_finding_leaves_no_trace_in_the_human_report(
+            self, workdir, synth_cal_dir, tmp_path):
+        """No impact, no record — and that includes helpful-sounding summaries
+        about what was held back. An explanation of silence is not silence
+        (Derek, 2026-09-13: "no impact no record. Humans do not need noise...
+        they will stop looking at the data if you report issue that are not
+        issues")."""
+        import csv as _csv
+        from core.batch import write_reports
+        store = OverrideStore(tmp_path / "ov.json")
+        report = process_collection(workdir, calibrations_dir=synth_cal_dir,
+                                    overrides=store)
+        # Put a suppressed finding on every run deliberately. The synthetic
+        # fixture happens to raise none of its own, and a test that asserts
+        # silence when there was nothing to say proves nothing at all.
+        for o in report.outcomes:
+            o.suppressed.append(
+                "content.gocator_R_coverage: NO DATA IMPACT — no profiles for "
+                "1.15 m at the start of the run, in the lead-in")
+        written = write_reports(report)
+
+        # Blank out every filesystem path the report echoes before scanning.
+        # Under pytest the temp directory is named after this test, so the
+        # paths contain the word "suppressed" and the report appears to be
+        # talking about suppression when it is only saying where it ran.
+        text = Path(written["report"]).read_text(encoding="utf-8")
+        body = text.replace(str(workdir), "<root>").replace(str(synth_cal_dir), "<cal>")
+        # NB: not "issues_" — a genuine FAILURE legitimately points a person
+        # at that file, and this test is about silence for non-issues only.
+        for word in ("NOISE", "quiet:", "held back", "noise limit", "suppress",
+                     "lead-in", "1.15 m"):
+            assert word not in body, f"the report mentions {word!r}"
+
+        # ...and the machine's copy has every one of them, as severity NOISE.
+        with open(written["issues"], newline="", encoding="utf-8") as fh:
+            rows = list(_csv.DictReader(fh))
+        noise = [r for r in rows if r["severity"] == "NOISE"]
+        assert len(noise) == len(report.outcomes)
+        assert all("gocator_R_coverage" in r["check_id"] for r in noise)
+
+    def test_run_mapping_moved_with_the_rest(self, workdir, synth_cal_dir, tmp_path):
+        """run_mapping.csv is the one other processes read, so its location is
+        a published interface. Derek chose to move it with the reports rather
+        than strand it — this pins the new path so the move is deliberate and
+        a future change to it has to break a test first."""
+        from core.batch import ALIGNMENT_DIR, PROCESSED_DIR, write_reports
+        store = OverrideStore(tmp_path / "ov.json")
+        report = process_collection(workdir, calibrations_dir=synth_cal_dir,
+                                    overrides=store)
+        written = write_reports(report)
+        assert Path(written["mapping"]) == (
+            workdir / PROCESSED_DIR / ALIGNMENT_DIR / "run_mapping.csv")
+        assert not (workdir / PROCESSED_DIR / "run_mapping.csv").exists()
 
     def test_every_warning_and_failure_is_a_row(self, workdir, synth_cal_dir,
                                                 tmp_path):
@@ -464,11 +529,17 @@ class TestIssueLog:
         written = write_reports(report)
         with open(written["issues"], newline="", encoding="utf-8") as fh:
             rows = list(_csv.DictReader(fh))
-        n_expected = sum(len(o.failures) + len(o.warnings) + len(o.held)
-                         for o in report.outcomes)
+        # `suppressed` counts too. This file is the MACHINE's view and it is
+        # complete: a finding too small for the human report is still a row
+        # here, as severity NOISE, so WARN + NOISE is always every warning the
+        # QC layer raised. That is what makes the quiet report trustworthy —
+        # nothing was dropped, only moved.
+        n_expected = sum(len(o.failures) + len(o.warnings) + len(o.suppressed)
+                         + len(o.held) for o in report.outcomes)
         assert len(rows) == n_expected
         assert n_expected > 0, "the synthetic run should warn about something"
-        assert {r["severity"] for r in rows} <= {"FAIL", "ERROR", "WARN", "HELD"}
+        assert {r["severity"] for r in rows} <= {"FAIL", "ERROR", "WARN",
+                                                 "NOISE", "HELD"}
         assert all(r["run_id"] for r in rows)
 
     def test_a_skipped_run_lists_each_missing_input(self, workdir, synth_cal_dir,

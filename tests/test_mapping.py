@@ -329,7 +329,12 @@ class TestRunMapping:
         assert not [k for k in written if k.startswith("error")], written
         p = Path(written["mapping"])
         assert p.name == "run_mapping.csv"
-        assert p.parent.name == "Processed"
+        # Moved 2026-09-13 into a folder of this app's own, because Processed/
+        # is shared with whatever else writes a collection's outputs. The NAME
+        # is what other processes point at and it is unchanged; the folder
+        # they point at moved once, deliberately.
+        assert p.parent.name == "Alignment"
+        assert p.parent.parent.name == "Processed"
 
     def test_it_records_the_logger_folder_and_the_skew(self, done):
         _, report, written = done

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import discovery as disc
-from core.batch import preflight, process_collection, write_reports
+from core.batch import preflight, process_collection, processed_dir, write_reports
 from core.calibration import (
     Undistorter, camera_ground_center_m, ground_to_image_row, lens_height_m,
 )
@@ -808,7 +808,11 @@ class MainWindow(QMainWindow):
             failed = "\n".join(c.message for c in self.result.report.failed)
             QMessageBox.warning(self, "Export blocked", f"Failed QC checks:\n{failed}")
             return
-        default = Path(self.result.run.root) / "Exports" / \
+        # Same folder the batch writes to, via the same function - the viewer
+        # offering a different default to the one the batch uses is how two
+        # copies of the same table end up in two places (was <root>/Exports/
+        # until 2026-09-13).
+        default = processed_dir(self.result.run.root) / \
             f"{self.result.run.run_id}_alignment.csv"
         chosen, _ = QFileDialog.getSaveFileName(
             self, "Export alignment table", str(default), "CSV files (*.csv)")

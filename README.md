@@ -198,7 +198,7 @@ the rest carry on.
    shared `YYYYMMDD.HHMMSS` stamp, then filtered against the ACS **Daily
    file** (`<YYYYMMDD>/Daily_ARAN104_*.csv`): a stamp with no row there was
    never a section, and a row whose `Status` is X was a false start. Both are
-   left alone and listed in `Processed/run_mapping.csv` with the reason. With
+   left alone and listed in `Processed/Alignment/run_mapping.csv` with the reason. With
    no Daily file present, nothing is filtered.
 2. **Select a run.** QC + alignment run in the background (a few seconds).
 3. **Read the QC panel.** Every check shows PASS / WARN / FAIL:
@@ -291,12 +291,39 @@ deliverables** so downstream processes and the client get correct data.
 - **Gocator CSVs** — `latitude,longitude,elevation` columns inserted *in place*
   immediately before `x0`, one position per profile. Streaming rewrite
   (~0.2 s per 18 MB file).
-- **Exports/** — the per-run alignment CSV (one row per image with a `camera`
-  column covering every camera).
-- **Processed/** — everything about the batch itself: `batch_report_<ts>.txt`,
-  `issues_<ts>.csv` (every WARN and FAIL, one row each), `affected_<ts>.csv`
-  (every deliverable NOT written, with the reason), and `run_mapping.csv`
-  (one row per run, not timestamped, so other tools can point at it by name).
+- **Processed/Alignment/** — everything this app writes about a collection,
+  in one folder:
+  - `<run_id>_alignment.csv` — the per-run alignment table, one row per image
+    with a `camera` column covering every camera. **This is the file other
+    processes read.**
+  - `batch_report_<ts>.txt` — what a person reads.
+  - `issues_<ts>.csv` — every finding, one row each.
+  - `affected_<ts>.csv` — every deliverable NOT written, with the reason.
+  - `run_mapping.csv` — one row per run, not timestamped, so other tools can
+    point at it by name.
+
+  `Processed/` on its own is a shared name — other processes write a
+  collection's outputs there too — so this app keeps its files in the
+  `Alignment/` subfolder.
+
+  **Two moves happened on 2026-09-13, and both change paths other tools may
+  be pointed at:**
+  - the batch records moved from `Processed/` to `Processed/Alignment/`
+  - the alignment CSV moved from `Exports/` to `Processed/Alignment/`
+
+  The second one matters most: a collection root already contains
+  `ExportBakFiles/`, `ExportDataFiles/` and `ExportLogs/` from ACS, so
+  `Exports/` was a fourth `Export*` folder and the only one that was ours.
+  Files written before that date stay where they are; nothing moves them.
+
+  `issues_<ts>.csv` carries **two severities of warning**. `WARN` is what the
+  batch report shows a person. `NOISE` is a finding measured as too small to
+  be worth their attention — under 0.5% of the run *and* with no single
+  unbroken defect over 0.5 m, or sitting in the lead-in ahead of the section
+  start. Nothing is discarded: WARN + NOISE is always every warning the QC
+  layer raised, so a downstream database still sees every event while the
+  report a person reads stays quiet. A report that says nothing means findings
+  were weighed and found small, not that nothing was looked for.
 
 
 The viewer still shows the primary (Rear/Pave) camera only; the batch geotags
@@ -333,7 +360,7 @@ the batch is safe: values are replaced, never duplicated.
 A QC failure is **scoped to what it actually invalidates**, not to the whole
 run. One laser's clock failing no longer costs the images their GPS — that run
 comes out `partial`, with the bad sensor held back and the reason recorded in
-`Processed/affected_<ts>.csv`. Only a failure that invalidates everything
+`Processed/Alignment/affected_<ts>.csv`. Only a failure that invalidates everything
 leaves a run untouched. A missing post-processed export is called out
 explicitly so it can be supplied.
 

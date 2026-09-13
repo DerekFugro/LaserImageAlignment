@@ -158,8 +158,8 @@ and `tests/test_cli.py` has a test that fails if that ever changes.
 - Collected-data folders under `F:\Sidewalk\099_CollectedData\` are read-only
   **except for the app's own deliberate GPS writes** (Spec Amendment A). That
   means: the batch writes GPS EXIF into `Images/**/*.jpg`, GPS columns into
-  `GoCatorData/**/*.csv`, the per-run table into `Exports/`, and its own
-  reports into `Processed/`. It also RENAMES every placed image to its
+  `GoCatorData/**/*.csv`, and the per-run alignment table plus all its own
+  reports into `Processed/Alignment/`. It also RENAMES every placed image to its
   section distance, writes `rename_manifest.csv` beside them, and moves
   pre-section images into `BeforeCollection/`. Nothing else - and never
   inside `SBGData/`. **Do not "fix" this by making the app read-only again;
