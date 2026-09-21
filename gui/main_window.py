@@ -7,8 +7,8 @@ import numpy as np
 from PySide6.QtCore import QSettings, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QFileDialog, QLabel, QMainWindow, QMessageBox, QSlider, QSplitter,
-    QToolBar, QVBoxLayout, QWidget,
+    QFileDialog, QInputDialog, QLabel, QMainWindow, QMessageBox, QSlider,
+    QSplitter, QToolBar, QVBoxLayout, QWidget,
 )
 
 from core import discovery as disc
@@ -243,6 +243,9 @@ class MainWindow(QMainWindow):
         # tell it otherwise. A file the user can open is the fix.
         self.calibrations_dir = config.calibrations_dir()
         self.run_root: Path | None = None
+        # WHICH collection day is open, when the folder holds several. None
+        # means one day (or none), and everything behaves as it always has.
+        self.daily_path: Path | None = None
         self.runs: list[disc.RunPaths] = []
         self.result: RunResult | None = None
         self.current_image = 0
@@ -304,11 +307,46 @@ class MainWindow(QMainWindow):
         self.settings.setValue("last_root", chosen)
         self.open_root(Path(chosen))
 
+    def _choose_day(self, root: Path) -> tuple[bool, Path | None]:
+        """Which collection day, when the folder holds more than one.
+
+        Returns (go_ahead, daily_path). An upload can hold ten YYYYMMDD
+        folders sharing one Images/, GoCatorData/ and SBGData/. Picking for
+        the user would mean nine days silently missing from the mapping, so
+        the user picks — and cancelling opens nothing rather than opening
+        whichever day happened to sort first.
+
+        One day, or none, asks nothing: that is every collection made before
+        multi-day uploads, and it must behave as it always did.
+        """
+        from core.daily import day_of_daily_file, list_daily_files
+
+        days = list_daily_files(root)
+        if len(days) <= 1:
+            return True, None
+        labels = [f"{day_of_daily_file(p) or p.parent.name}  ({p.name})"
+                  for p in days]
+        label, ok = QInputDialog.getItem(
+            self, "Which collection day?",
+            f"{root.name} holds {len(days)} collection days.\n"
+            "Runs from the other days are not touched.",
+            labels, 0, False)
+        if not ok:
+            return False, None
+        return True, days[labels.index(label)]
+
     def open_root(self, root: Path):
+        go, daily = self._choose_day(root)
+        if not go:
+            self.readout_label.setText("nothing opened — no day chosen")
+            return
         self.run_root = root
-        self.readout_label.setText(f"discovering runs in {root.name}…")
+        self.daily_path = daily
+        which = f" — day {daily.parent.name}" if daily else ""
+        self.readout_label.setText(f"discovering runs in {root.name}{which}…")
         worker = Worker(disc.discover_runs, root,
-                        calibrations_dir=self.calibrations_dir, overrides=self.overrides)
+                        calibrations_dir=self.calibrations_dir,
+                        overrides=self.overrides, daily_path=daily)
         worker.signals.finished.connect(self._on_runs_discovered)
         worker.signals.error.connect(self._on_worker_error)
         self.thread_pool.start(worker)
@@ -839,7 +877,8 @@ class MainWindow(QMainWindow):
         self.batch_action.setEnabled(False)
         self.readout_label.setText("batch pre-check: inspecting every run…")
         worker = Worker(preflight, self.run_root,
-                        calibrations_dir=self.calibrations_dir, overrides=self.overrides)
+                        calibrations_dir=self.calibrations_dir,
+                        overrides=self.overrides, daily_path=self.daily_path)
         worker.signals.finished.connect(self._on_preflight_finished)
         worker.signals.error.connect(self._on_batch_error)
         self.thread_pool.start(worker)
@@ -878,7 +917,7 @@ class MainWindow(QMainWindow):
         # back. Without the ACS Daily file there is no section start to
         # measure from, and names are left alone.
         from core.daily import find_daily_file
-        if find_daily_file(self.run_root) is None:
+        if find_daily_file(self.run_root, self.daily_path) is None:
             head += ("\n\nImage filenames will be LEFT AS THEY ARE — this "
                      "collection has no Daily_ARAN104 file, so there is no "
                      "section start to measure from.")
@@ -928,7 +967,8 @@ class MainWindow(QMainWindow):
         def job():
             return process_collection(
                 self.run_root, calibrations_dir=self.calibrations_dir,
-                overrides=self.overrides, progress=report_progress)
+                overrides=self.overrides, progress=report_progress,
+                daily_path=self.daily_path)
 
         worker = Worker(job)
         worker.signals.finished.connect(self._on_batch_finished)

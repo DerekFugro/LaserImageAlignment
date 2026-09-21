@@ -59,10 +59,52 @@ class DailyEntry:
         return self.status.strip().upper() in EXCLUDED_STATUS
 
 
-def find_daily_file(root: Path) -> Path | None:
-    """The day folder is named YYYYMMDD; the Daily file sits inside it."""
-    root = Path(root)
-    hits = sorted(root.glob("*/Daily_ARAN104_*.csv"))
+def list_daily_files(root: Path) -> list[Path]:
+    """Every day folder's Daily file under `root`, oldest first.
+
+    An upload can hold several collection days side by side: ten YYYYMMDD
+    folders, each with its own Daily file, while Images/, GoCatorData/ and
+    SBGData/ hold every day's runs together. This is how a caller finds out
+    which days are there so somebody can choose one.
+    """
+    return sorted(Path(root).glob("*/Daily_ARAN104_*.csv"))
+
+
+def day_of_daily_file(path: Path) -> str:
+    """The YYYYMMDD the file belongs to, taken from its own name, else from
+    its folder. Empty when neither carries one - the caller shows the path."""
+    path = Path(path)
+    for text in (path.name, path.parent.name):
+        m = re.search(r"(\d{8})", text)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def daily_file_for_day(root: Path, day: str) -> Path | None:
+    """The Daily file of one named day, or None when that day is not here."""
+    for path in list_daily_files(root):
+        if day_of_daily_file(path) == day:
+            return path
+    return None
+
+
+def find_daily_file(root: Path, daily_path: Path | None = None) -> Path | None:
+    """The Daily file to use. The day folder is named YYYYMMDD; the Daily file
+    sits inside it.
+
+    `daily_path` is the day somebody chose - the CLI's --daily/--day, or the
+    viewer's day picker. Given one, it is used as given and nothing is
+    globbed: choosing day three and reading day one's sections would rename
+    images against the wrong chainage, which is worse than not running.
+
+    With no choice made, the oldest is used, exactly as before multi-day
+    uploads existed. That is a guess, so callers are expected to warn when
+    list_daily_files() returned more than one.
+    """
+    if daily_path is not None:
+        return Path(daily_path)
+    hits = list_daily_files(root)
     return hits[0] if hits else None
 
 

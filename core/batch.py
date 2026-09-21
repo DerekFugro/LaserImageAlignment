@@ -109,7 +109,8 @@ def _gocator_ptp_span(path: Path) -> tuple[float, float] | None:
 
 
 def preflight(root: Path, calibrations_dir: Path | None = None,
-              overrides: disc.OverrideStore | None = None) -> PreflightReport:
+              overrides: disc.OverrideStore | None = None,
+              daily_path: Path | None = None) -> PreflightReport:
     """Check EVERY run BEFORE anything is written: are the required inputs
     present, and does the postprocessed export actually COVER the run's times?
 
@@ -122,7 +123,7 @@ def preflight(root: Path, calibrations_dir: Path | None = None,
     report.exif_ok, report.exif_note = ensure_piexif()
     nav_cache: dict = {}
     for run in disc.discover_runs(root, calibrations_dir=calibrations_dir,
-                                  overrides=overrides):
+                                  overrides=overrides, daily_path=daily_path):
         pf = RunPreflight(run_id=run.run_id)
         for cam, cam_dir in run.cameras.items():
             pf.cameras[cam] = len(list(Path(cam_dir).glob("*.jpg")))
@@ -277,6 +278,14 @@ class BatchReport:
     write_images: bool = True
     write_gocator: bool = True
     write_csv: bool = True
+    # WHICH ACS Daily file this batch was told to use, for a folder holding
+    # several collection days. Empty means nobody chose and the oldest was
+    # taken, as it always was. Carried on the report rather than passed to
+    # each step because three places read the Daily file AFTER the runs are
+    # picked - the rename, the section distances and run_mapping.csv - and a
+    # step that quietly went back to the glob would name day three's images
+    # against day one's chainage.
+    daily_path: str = ""
 
     @property
     def dry_run(self) -> bool:
@@ -396,6 +405,10 @@ class BatchReport:
             f"{len(self.needs_attention) - len(self.partial)} need attention)",
             "",
         ]
+        # WHICH day this batch was for. Only when somebody said, because a
+        # single-day collection's report must read exactly as it always has.
+        if self.daily_path:
+            lines[-1:] = [f"daily:   {self.daily_path}", ""]
         # A number in the lever-arm file that the parser did not understand is
         # a number the app is NOT using while the file says otherwise. It has
         # to be visible here: on 2026-09-04 the file said the lens height was
@@ -632,7 +645,9 @@ def write_run_mapping_csv(report: "BatchReport", out_path: Path) -> Path:
     MAPPING_COLUMNS), plus the inputs each run resolved to."""
     from .daily import find_daily_file, parse_daily
 
-    daily_path = find_daily_file(Path(report.root))
+    # the day this batch was told to use, not whichever one sorts first
+    chosen = Path(report.daily_path) if report.daily_path else None
+    daily_path = find_daily_file(Path(report.root), chosen)
     daily = parse_daily(daily_path) if daily_path else {}
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -771,18 +786,23 @@ def process_collection(root: Path, calibrations_dir: Path | None = None,
                        overrides: disc.OverrideStore | None = None,
                        write_images: bool = True, write_gocator: bool = True,
                        write_csv: bool = True,
-                       progress=None) -> BatchReport:
+                       progress=None,
+                       daily_path: Path | None = None) -> BatchReport:
     """Process every run under `root`. `progress(stage, run_id, i, n)` is
     called for UI updates; it must be cheap and thread-safe.
 
     Runs without required inputs or without export coverage are SKIPPED and
-    listed (see preflight()); complete runs are still processed."""
+    listed (see preflight()); complete runs are still processed.
+
+    daily_path is the ONE collection day this batch is for, when the folder
+    holds several. None means the oldest, exactly as before."""
     root = Path(root)
     report = BatchReport(
         root=str(root),
         started_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         write_images=write_images, write_gocator=write_gocator,
         write_csv=write_csv,
+        daily_path=str(daily_path) if daily_path else "",
     )
     # BEFORE anything reads the folders: put back any image a killed batch
     # left under a temporary name. A temp file does not match *.jpg, so the
@@ -792,18 +812,21 @@ def process_collection(root: Path, calibrations_dir: Path | None = None,
     # Not into a Status X run, and not on a dry run. This walk happens before
     # any filtering, so it reached into both until 2026-09-02.
     report.recovered = _recover_interrupted_renames(
-        root, skip=disc.excluded_stamps(root), apply=write_images)
-    rep_pf = preflight(root, calibrations_dir=calibrations_dir, overrides=overrides)
+        root, skip=disc.excluded_stamps(root, daily_path), apply=write_images)
+    rep_pf = preflight(root, calibrations_dir=calibrations_dir,
+                       overrides=overrides, daily_path=daily_path)
     skip_ids = {r.run_id for r in rep_pf.not_ready}
-    runs = disc.discover_runs(root, calibrations_dir=calibrations_dir, overrides=overrides)
+    runs = disc.discover_runs(root, calibrations_dir=calibrations_dir,
+                              overrides=overrides, daily_path=daily_path)
     # what was on disk but not in the Daily file, so the report can say so once
     registered = {r.run_id for r in runs}
     # A run marked Status X in the Daily file has a row; it is just not ours
     # to process. Subtract it from `ignored` or it would be reported as having
     # no row at all, which is a different and untrue statement.
     on_disk = {r.run_id for r in disc.discover_runs(
-        root, calibrations_dir=calibrations_dir, registered_only=False)}
-    excluded = disc.excluded_stamps(root)
+        root, calibrations_dir=calibrations_dir, registered_only=False,
+        daily_path=daily_path)}
+    excluded = disc.excluded_stamps(root, daily_path)
     report.excluded = sorted(on_disk & excluded)
     report.ignored = sorted(on_disk - registered - excluded)
     by_id = {r.run_id: r for r in rep_pf.runs}
@@ -938,7 +961,11 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
     from .rename import (move_before_collection, rename_camera_folder,
                          section_distance_mm)
 
-    daily_path = find_daily_file(root)
+    # THE SAME DAY the runs were picked from. A glob here would measure day
+    # three's images against day one's section starts and write that into
+    # every filename.
+    chosen = Path(report.daily_path) if report.daily_path else None
+    daily_path = find_daily_file(root, chosen)
     daily = parse_daily(daily_path) if daily_path else {}
     if not daily:
         where = "no Daily_ARAN104 file in this collection"

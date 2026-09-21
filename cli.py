@@ -49,6 +49,49 @@ class UsageError(Exception):
     it must not look like "ran, and something needs a person"."""
 
 
+def _daily(args) -> Path | None:
+    """WHICH collection day to work on, from --daily or --day.
+
+    An upload can hold ten YYYYMMDD folders, each with its own Daily file,
+    while Images/, GoCatorData/ and SBGData/ hold every day's runs together.
+    Without a choice the app reads whichever Daily file sorts first — the
+    oldest — and every other day's runs vanish from the mapping with nothing
+    said. So: say which, or be told there is more than one.
+
+    Returns None when neither option was given, which keeps a single-day
+    collection behaving exactly as it always has.
+    """
+    from core.daily import daily_file_for_day, day_of_daily_file, list_daily_files
+
+    root = Path(args.collection)
+    if args.daily and args.day:
+        raise UsageError("give --daily or --day, not both")
+    if args.daily:
+        path = Path(args.daily)
+        if not path.is_file():
+            raise UsageError(f"--daily: no such file: {path}")
+        return path
+    if args.day:
+        path = daily_file_for_day(root, args.day.strip())
+        if path is None:
+            days = [day_of_daily_file(p) for p in list_daily_files(root)]
+            have = ", ".join(d for d in days if d) or "none"
+            raise UsageError(
+                f"--day {args.day}: no Daily_ARAN104 file for that day under "
+                f"{root}. Days here: {have}")
+        return path
+    # Nobody chose. One day is the normal case and says nothing; several is
+    # the trap this option exists for, so it is named on stderr every time —
+    # including for `runs` and `check`, where it is cheapest to notice.
+    days = list_daily_files(root)
+    if len(days) > 1:
+        names = ", ".join(day_of_daily_file(p) or p.name for p in days)
+        print(f"WARNING: {len(days)} collection days here ({names}); using "
+              f"{days[0]} because no --day was given. Runs from the other "
+              f"days are NOT processed.", file=sys.stderr)
+    return None
+
+
 def _overrides(args) -> disc.OverrideStore:
     """The SAME sidecar the GUI uses, so a path located in one is known to the
     other. --locate adds to it before anything is discovered."""
@@ -115,11 +158,14 @@ def cmd_runs(args) -> int:
     """What this collection holds, and what the app will do with each run."""
     root = Path(args.collection)
     cal = Path(args.calibrations) if args.calibrations else None
+    daily = _daily(args)
     on_disk = {r.run_id for r in disc.discover_runs(root, calibrations_dir=cal,
-                                                    registered_only=False)}
-    will_run = [r.run_id for r in disc.discover_runs(root, calibrations_dir=cal)]
-    excluded = disc.excluded_stamps(root)
-    registered = disc.daily_stamps(root)
+                                                    registered_only=False,
+                                                    daily_path=daily)}
+    will_run = [r.run_id for r in disc.discover_runs(root, calibrations_dir=cal,
+                                                     daily_path=daily)]
+    excluded = disc.excluded_stamps(root, daily)
+    registered = disc.daily_stamps(root, daily)
 
     if not on_disk and not registered:
         print(f"no runs found under {root}", file=sys.stderr)
@@ -146,9 +192,11 @@ def cmd_check(args) -> int:
     root = Path(args.collection)
     cal = Path(args.calibrations) if args.calibrations else None
     store = _overrides(args)
+    daily = _daily(args)
     for note in _apply_locates(store, root, args.locate, cal):
         print(note)
-    rep = preflight(root, calibrations_dir=cal, overrides=store)
+    rep = preflight(root, calibrations_dir=cal, overrides=store,
+                    daily_path=daily)
     if not rep.runs:
         print(f"no runs found under {root}", file=sys.stderr)
         return EXIT_CANNOT_RUN
@@ -162,6 +210,7 @@ def cmd_process(args) -> int:
     root = Path(args.collection)
     cal = Path(args.calibrations) if args.calibrations else None
     store = _overrides(args)
+    daily = _daily(args)
     for note in _apply_locates(store, root, args.locate, cal):
         print(note)
 
@@ -171,6 +220,7 @@ def cmd_process(args) -> int:
         write_gocator=not args.no_gocator,
         write_csv=not args.no_csv,
         progress=_progress(args.quiet),
+        daily_path=daily,
     )
     if not report.outcomes and not report.excluded and not report.ignored:
         print(f"no runs found under {root}", file=sys.stderr)
@@ -207,6 +257,14 @@ def build_parser() -> argparse.ArgumentParser:
                              "Outranks $LIA_CALIBRATIONS and lia.ini. "
                              f"Currently: {config.calibrations_dir()} "
                              f"(from {config.calibrations_source()})")
+        sp.add_argument("--daily", metavar="FILE",
+                        help="the ACS Daily report to use, for a folder "
+                             "holding several collection days. Exactly this "
+                             "file; nothing is globbed. Absent: the oldest, "
+                             "as before")
+        sp.add_argument("--day", metavar="YYYYMMDD",
+                        help="the same thing by day: <collection>/<day>/"
+                             "Daily_ARAN104_<day>.csv")
         sp.add_argument("--overrides", metavar="FILE",
                         help="where located paths are remembered. Default: the "
                              "same sidecar the viewer uses")

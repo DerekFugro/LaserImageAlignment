@@ -247,11 +247,14 @@ def _find_events_export(root: Path) -> Path | None:
     return find_events_file(root)
 
 
-def _daily_entries(root: Path) -> dict:
-    """The Daily file's rows, or {} when there is no readable one."""
+def _daily_entries(root: Path, daily_path: Path | None = None) -> dict:
+    """The Daily file's rows, or {} when there is no readable one.
+
+    `daily_path` is the day somebody chose; None means the oldest, as before.
+    """
     from .daily import find_daily_file, parse_daily
 
-    path = find_daily_file(Path(root))
+    path = find_daily_file(Path(root), daily_path)
     if path is None:
         return {}
     try:
@@ -260,17 +263,18 @@ def _daily_entries(root: Path) -> dict:
         return {}
 
 
-def excluded_stamps(root: Path) -> set[str]:
+def excluded_stamps(root: Path, daily_path: Path | None = None) -> set[str]:
     """Run stamps the ACS Daily file marks Status X - do not process.
 
     Separate from daily_stamps() so the batch can say WHY a folder on disk was
     left alone. "Not in the Daily file" and "in the Daily file, marked X" are
     different facts about a folder and must not print the same sentence.
     """
-    return {rid for rid, e in _daily_entries(root).items() if e.excluded}
+    return {rid for rid, e in _daily_entries(root, daily_path).items()
+            if e.excluded}
 
 
-def daily_stamps(root: Path) -> set[str] | None:
+def daily_stamps(root: Path, daily_path: Path | None = None) -> set[str] | None:
     """The run stamps the ACS Daily file registers AND does not exclude, or
     None when there is no Daily file to ask.
 
@@ -291,7 +295,7 @@ def daily_stamps(root: Path) -> set[str] | None:
     and that is reported as what it is rather than treated as "no Daily file"
     and used to justify processing everything.
     """
-    entries = _daily_entries(root)
+    entries = _daily_entries(root, daily_path)
     if not entries:
         return None
     return {rid for rid, e in entries.items() if not e.excluded}
@@ -299,7 +303,8 @@ def daily_stamps(root: Path) -> set[str] | None:
 
 def discover_runs(root: Path, calibrations_dir: Path | None = None,
                   overrides: "OverrideStore | None" = None,
-                  registered_only: bool = True) -> list[RunPaths]:
+                  registered_only: bool = True,
+                  daily_path: Path | None = None) -> list[RunPaths]:
     """Discover all runs in a run root; apply saved user overrides for missing inputs.
 
     calibrations_dir=None resolves at call time via core.config: lia.ini if
@@ -308,6 +313,9 @@ def discover_runs(root: Path, calibrations_dir: Path | None = None,
 
     registered_only=True drops stamps the ACS Daily file does not list (see
     daily_stamps). Pass False to see every stamp that is on disk.
+
+    daily_path names WHICH Daily file to register against, for a folder
+    holding several collection days. None keeps the old behaviour.
     """
     from .calibration import LEVER_ARMS_FILENAME, find_pave_calibration
 
@@ -316,7 +324,7 @@ def discover_runs(root: Path, calibrations_dir: Path | None = None,
     lever_arms = Path(calibrations_dir) / LEVER_ARMS_FILENAME
     lever_arms = lever_arms if lever_arms.is_file() else None
     root = Path(root)
-    registered = daily_stamps(root) if registered_only else None
+    registered = daily_stamps(root, daily_path) if registered_only else None
     nav_export = _find_nav_export(root)
     events_export = _find_events_export(root)
     calibration = find_pave_calibration(calibrations_dir)

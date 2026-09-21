@@ -248,8 +248,13 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData) -> MatchRe
     k = n_images - n_triggers.
 
     WHY ordinal, not distance-fitting: both sequences ARE the same physical
-    trigger events in order, and the image counter is driven by the camera
-    system's own distance count while trigger distances come from the SBG DMI.
+    trigger events in order, but their distances are measured differently.
+    Image "distance" is the camera's own ordinal x TRIGGER_SPACING_M, i.e. the
+    SBG's REALTIME (virtual-odometer) travel that fired each shot, while
+    trigger distances come off the postprocessed export. NOT the wheel: see
+    Spec Amendment F (Derek, 2026-08-20) - the cameras are fired by the SBG
+    sync output in virtual-odometer mode, so none of this says anything about
+    wheel calibration.
     The two disagree by a small scale factor (verified ~0.2% over 443 m on run
     20260816.110840), so a constant distance offset cannot hold across a run —
     and once a scale term is allowed, distance data cannot identify the shift
@@ -260,8 +265,11 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData) -> MatchRe
     consistent with every sample run: 83 img / 82 trg, 593 img / 592 trg).
 
     The distance data is still used — as a diagnostic: a robust linear fit
-    trigger_dist ≈ a * image_dist + d0 reports the counter-vs-DMI scale `a`
-    and per-image residuals. Large |a - 1| means wheel-calibration mismatch.
+    trigger_dist ≈ a * image_dist + d0 reports the cadence scale `a` and
+    per-image residuals. Large |a - 1| means the realtime solution disagreed
+    with the postprocessed one over the run (see align.counter_scale in
+    pipeline.py) — it is a convergence signal, not a wheel check, and neither
+    `a` nor the residual is a position error.
     """
     img_d = images.dist_m
     trg_d = triggers.dist_m
