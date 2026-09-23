@@ -158,7 +158,8 @@ Verification~~.
 **Command line (Amendment J):** `cli.py runs | check | process <collection>`,
 with `--locate KEY=PATH`, `--no-images/--no-gocator/--no-csv`, `--calibrations`,
 `--overrides`, `-q`. The exit code is the contract: 0 all written, 1 ran but
-something needs a person, 2 could not run at all.
+something needs a person, 2 could not run at all. **Plus `--daily FILE` /
+`--day YYYYMMDD` - see Amendment K.**
 
 ## ⭐ Roles / permissions:
 None — single local user.
@@ -1223,3 +1224,47 @@ An app that is about to be shipped should contain only what production needs,
 and should be honest about what it did. Every fix above is one of those two:
 take out what the operator will never use, or stop a report from saying
 something that is not so.
+
+---
+
+## Amendment K - one collection day at a time (Derek, 2026-09-18)
+
+**Why.** Uploads now arrive with several collection days in one folder: ten
+`YYYYMMDD` folders, each with its own `Daily_ARAN104_*.csv`, while `Images/`,
+`GoCatorData/` and `SBGData/` hold every day's runs together.
+`find_daily_file()` globbed and took the first - the oldest - so day one was
+processed and every other day's runs dropped out of `run_mapping.csv` with
+nothing said. The orchestrator now runs the pipeline once per day, and every
+downstream app follows `run_mapping.csv`, so LIA is where the day is chosen.
+Request: `Spec/LaserImageAlignment_daily_change.md`.
+
+**What.**
+- CLI: `--daily FILE` (that exact Daily file; nothing globbed) and
+  `--day YYYYMMDD` (resolves to `<collection>/<day>/Daily_ARAN104_<day>.csv`),
+  on `runs`, `check` and `process`. A file or day that is not there, or both
+  options at once, exits 2 with the reason on stderr.
+- GUI: opening a folder with more than one day asks which. Cancelling opens
+  nothing. One day asks nothing.
+- **Absent, behaviour is unchanged.** With several days and no choice the CLI
+  warns on stderr, names the days, and processes the oldest as before.
+- The batch report gains a `daily:` line only when a day was chosen, so a
+  single-day report reads exactly as it did.
+
+**The rule that matters.** The chosen day has to reach **every** reader of the
+Daily file, not only discovery. Four read it: discovery (which stamps are
+registered), Status X (`excluded_stamps`), the rename (section start ->
+filename distance) and `write_run_mapping_csv` (section, direction, chainage).
+The last two run AFTER the runs are picked, and a glob there would rename day
+three's images against day one's section starts - worse than skipping them,
+because the result is written into every filename. The choice is therefore
+carried on `BatchReport.daily_path`, which both late readers take from the
+report rather than looking again.
+
+Same shape as the rule at the end of Amendment J: a flag has to reach every
+place it governs, including the ones that do not look like the main path.
+
+**Not changed.** `run_mapping.csv` keeps its path, name and columns. Nothing
+is written into `Processed/_orchestrator/`; the orchestrator's per-day copies
+of the mapping are its own.
+
+Tests: `tests/test_daily_selection.py`.

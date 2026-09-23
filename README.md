@@ -185,6 +185,19 @@ Flags:
 - `--no-images` / `--no-gocator` / `--no-csv` — all three together is a dry run:
   nothing is written into the collection, no rename, no `BeforeCollection/`.
   The batch report is still written, and says plainly which it was.
+- `--daily FILE` / `--day YYYYMMDD` — **which collection day**, for a folder
+  that holds several. An upload can carry ten `YYYYMMDD` folders, each with its
+  own `Daily_ARAN104_*.csv`, while `Images\`, `GoCatorData\` and `SBGData\` hold
+  every day's runs together. `--daily` names the Daily file exactly; `--day`
+  finds `<collection>\<day>\Daily_ARAN104_<day>.csv`. The chosen day is used
+  everywhere the Daily file is read — which runs are registered, Status X,
+  the section starts the rename measures from, and `run_mapping.csv` — so a
+  day's images are never named against another day's chainage. A path that
+  is not there, a day that is not there, or both options at once exits 2.
+  **Absent, nothing changes:** one day is used as before, and a folder with
+  several days and no choice prints a warning on stderr naming them, then
+  processes the oldest. The batch report gains a `daily:` line when a day was
+  chosen. The viewer asks which day when it opens a multi-day folder.
 - `--calibrations DIR`, `--overrides FILE`, `-q` (no per-run progress).
 
 A missing input does not stop the other runs: that run is refused, named, and
