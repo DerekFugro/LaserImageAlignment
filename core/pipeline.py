@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from . import discovery as disc
+from .atomic import atomic_open
 from .alignment import (
     ImageAlignment, MatchResult, PtpOffsetResult, TriggerData,
     align_images, build_triggers, gocator_distances, match_images_to_triggers,
@@ -282,7 +283,8 @@ def export_csv(result: RunResult, out_path: Path, rename_info: dict | None = Non
     def num(x, fmt="{:.9f}"):
         return fmt.format(x) if np.isfinite(x) else ""
 
-    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+    # atomic: the table other processes read, one row per image
+    with atomic_open(out_path) as fh:
         w = csv.writer(fh)
         w.writerow(EXPORT_COLUMNS)
         for cam_name, al in sorted(alignments.items()):

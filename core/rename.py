@@ -27,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .atomic import atomic_open
 from .daily import DailyEntry
 
 MANIFEST_NAME = "rename_manifest.csv"
@@ -321,7 +322,9 @@ def rename_camera_folder(folder: Path, files: list[str], distance_mm,
     # home — 64 images were stranded that way on 20260824.
     rows.extend(_rows_for_files_not_seen(manifest, {r[0] for r in rows}, folder))
     if rows:
-        with open(manifest, "w", newline="", encoding="utf-8") as fh:
+        # atomic: this file is load-bearing - cut short, the folder can no
+        # longer be matched or undone
+        with atomic_open(manifest) as fh:
             w = csv.writer(fh)
             w.writerow(MANIFEST_COLUMNS)
             w.writerows(rows)
@@ -403,7 +406,7 @@ def move_before_collection(folder: Path, dry_run: bool = False) -> tuple[int, li
         for r in rows:
             if r["new_name"] in names:
                 r["note"] = f"moved to {BEFORE_DIR}/ (before the section start)"
-        with open(man, "w", newline="", encoding="utf-8") as fh:
+        with atomic_open(man) as fh:
             w = csv.DictWriter(fh, fieldnames=MANIFEST_COLUMNS)
             w.writeheader()
             w.writerows(rows)

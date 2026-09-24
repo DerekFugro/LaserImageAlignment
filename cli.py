@@ -184,7 +184,11 @@ def cmd_runs(args) -> int:
             verdict = "no data on disk for it"
         print(f"{bracket_stamp(rid):>18}  {'yes' if rid in on_disk else 'no':>7}  {verdict}")
     print(f"\n{len(will_run)} run(s) would be processed")
-    return EXIT_OK if will_run else EXIT_NEEDS_ATTENTION
+    if will_run:
+        return EXIT_OK
+    _reason(f"no run would be processed under {root} "
+            f"({len(known)} known, none both registered and on disk)")
+    return EXIT_NEEDS_ATTENTION
 
 
 def cmd_check(args) -> int:
@@ -201,7 +205,17 @@ def cmd_check(args) -> int:
         print(f"no runs found under {root}", file=sys.stderr)
         return EXIT_CANNOT_RUN
     print(rep.summary_text())
-    return EXIT_OK if not rep.not_ready and rep.exif_ok else EXIT_NEEDS_ATTENTION
+    if not rep.not_ready and rep.exif_ok:
+        return EXIT_OK
+    parts = []
+    if rep.not_ready:
+        first = rep.not_ready[0]
+        parts.append(f"{len(rep.not_ready)} of {len(rep.runs)} run(s) not ready "
+                     f"(e.g. {first.run_id}: {first.reason})")
+    if not rep.exif_ok:
+        parts.append(f"images cannot be geotagged: {rep.exif_note}")
+    _reason("; ".join(parts))
+    return EXIT_NEEDS_ATTENTION
 
 
 def cmd_process(args) -> int:
@@ -232,16 +246,56 @@ def cmd_process(args) -> int:
     # The reports are the record of what was written. They are written even for
     # a dry run: "what WOULD have happened" is worth keeping too, and the batch
     # report says plainly which it was.
-    for kind, path in write_reports(report).items():
+    written = write_reports(report)
+    for kind, path in written.items():
         print(f"{kind}: {path}")
 
     if args.no_images and args.no_gocator and args.no_csv:
         print("\nDRY RUN - nothing was written into the collection "
               "(--no-images --no-gocator --no-csv)")
 
+    return _process_exit(report, written)
+
+
+def _process_exit(report, written: dict) -> int:
+    """The exit code for `process`, plus the one reason line on stderr the
+    pipeline contract asks for whenever it is not 0.
+
+    Two things beyond the per-run status count as "a person must look":
+    - the rename did not finish. GPS is in the files but some images can be
+      left under temporary names; this used to exit 0, so the orchestrator
+      marked the stage PASS while the folder was half renamed.
+    - a record could not be written. run_mapping.csv is the gate every
+      downstream app reads; a stale one is not a clean finish.
+    """
     if report.aborted:
+        _reason(f"batch aborted: {getattr(report, 'abort_reason', '') or 'see the batch report'}")
         return EXIT_CANNOT_RUN
-    return EXIT_OK if not report.needs_attention else EXIT_NEEDS_ATTENTION
+    problems = []
+    if report.needs_attention:
+        counts: dict = {}
+        for o in report.needs_attention:
+            counts[o.status] = counts.get(o.status, 0) + 1
+        detail = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+        problems.append(f"{len(report.written)} of {len(report.outcomes)} run(s) "
+                        f"written; {detail}")
+    if report.rename_error:
+        problems.append(f"rename did not finish: {report.rename_error}")
+    failed_writes = [v for k, v in written.items() if k.startswith("error")]
+    if failed_writes:
+        problems.append("record not written: " + "; ".join(failed_writes))
+    if not problems:
+        return EXIT_OK
+    _reason(" | ".join(problems))
+    return EXIT_NEEDS_ATTENTION
+
+
+def _reason(text: str) -> None:
+    """The last line on stderr when the exit code is not 0 (contract rule 4).
+    The orchestrator puts this line in its review log, so it has to stand on
+    its own: what happened, in one line."""
+    sys.stdout.flush()
+    print(text, file=sys.stderr, flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:

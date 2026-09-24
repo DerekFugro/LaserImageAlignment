@@ -16,6 +16,7 @@ import numpy as np
 
 from . import calibration as cal
 from . import discovery as disc
+from .atomic import atomic_open, atomic_write_text
 from .alignment import PTP_PASS_MAX_DEV_S, offset_by_lever_arm
 from .formats import GOCATOR_META_COLS, TAI_UTC_NOMINAL_S
 from .geotag import ensure_piexif, geotag_image, inject_gocator_gps
@@ -603,7 +604,7 @@ def write_affected_csv(report: BatchReport, out_path: Path) -> Path:
     filtered and tracked rather than read by eye."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+    with atomic_open(out_path) as fh:
         w = csv.DictWriter(fh, fieldnames=AFFECTED_COLUMNS)
         w.writeheader()
         for row in report.affected_rows():
@@ -620,7 +621,7 @@ def write_issues_csv(report: "BatchReport", out_path: Path) -> Path:
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+    with atomic_open(out_path) as fh:
         w = csv.DictWriter(fh, fieldnames=ISSUE_COLUMNS)
         w.writeheader()
         for row in report.issue_rows():
@@ -667,7 +668,9 @@ def write_run_mapping_csv(report: "BatchReport", out_path: Path) -> Path:
                 return str(Path(v).parent)
         return ""
 
-    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+    # atomic: this is the gate every downstream app reads, so a killed batch
+    # must leave the previous mapping or the new one - never half of either
+    with atomic_open(out_path) as fh:
         w = csv.DictWriter(fh, fieldnames=MAPPING_COLUMNS)
         w.writeheader()
         for o in report.outcomes:
@@ -757,7 +760,7 @@ def write_reports(report: "BatchReport") -> dict:
     except OSError as exc:
         return {"error": f"could not create {PROCESSED_DIR}/{ALIGNMENT_DIR}/: {exc}"}
     jobs = [("report", f"batch_report_{stamp}.txt",
-             lambda p: p.write_text(report.to_text(), encoding="utf-8")),
+             lambda p: atomic_write_text(p, report.to_text())),
             ("issues", f"issues_{stamp}.csv",
              lambda p: write_issues_csv(report, p)),
             # NOT stamped: other processes read this one, and a name that

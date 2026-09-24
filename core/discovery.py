@@ -231,20 +231,74 @@ def primary_camera(cameras: dict[str, Path]) -> str | None:
     return next(iter(cameras), None)
 
 
-def _find_nav_export(root: Path) -> Path | None:
-    """First ascii-output.txt found under SBGData/**/export/ (session-level;
-    one export usually covers several runs — coverage QC decides applicability)."""
-    sbg = root / "SBGData"
+NAV_EXPORT_NAME = "ascii-output.txt"
+# An SBG session folder is named by the logger's own clock, which can sit a
+# few seconds off the collection system's. A run that starts a hair "before"
+# its own session must still find it.
+SESSION_TOLERANCE_S = MAX_SBG_STAMP_SKEW_S
+
+
+def _session_epoch(path: Path, sbg: Path) -> float | None:
+    """Start time of the SBG session a file belongs to, from the first folder
+    between it and SBGData/ whose name starts with a YYYYMMDD.HHMMSS stamp
+    (e.g. `20260821.124517_0001`). None when no such folder is on the way."""
+    for parent in path.parents:
+        if parent == sbg or sbg not in parent.parents:
+            break
+        m = re.match(r"(\d{8}\.\d{6})", parent.name)
+        if m:
+            return _stamp_epoch_s(m.group(1))
+    return None
+
+
+def _session_files(root: Path, name: str) -> list[tuple[float | None, Path]]:
+    """Every SBGData/**/export/<name>, with the start of the session it is in."""
+    sbg = Path(root) / "SBGData"
     if not sbg.is_dir():
+        return []
+    return [(_session_epoch(p, sbg), p) for p in sorted(sbg.rglob(f"export/{name}"))]
+
+
+def pick_session_file(files: list[tuple[float | None, Path]],
+                      run_stamp: str) -> Path | None:
+    """The export that belongs to this run: from the LATEST session that had
+    started by the time the run did.
+
+    Until 2026-09-23 every run got the first export found under SBGData/,
+    oldest first. One session per collection made that harmless. An upload
+    carrying several days - which is what --daily/--day exists for - holds
+    several sessions, and every run after the first day got day one's
+    trajectory. Preflight's coverage check caught it ("export does NOT cover
+    this run's times"), so nothing was written wrong, but every later day
+    was skipped. The choice is still verified by that same coverage check;
+    this only makes sure the right file is the one being checked.
+
+    Falls back to the first file - the old behaviour - when the sessions
+    carry no stamps or the run predates all of them, so a collection laid
+    out any other way behaves exactly as it did.
+    """
+    if not files:
         return None
-    hits = sorted(sbg.rglob("export/ascii-output.txt"))
-    return hits[0] if hits else None
+    t_run = _stamp_epoch_s(run_stamp)
+    if t_run is not None:
+        started = [(t, p) for t, p in files
+                   if t is not None and t <= t_run + SESSION_TOLERANCE_S]
+        if started:
+            return max(started, key=lambda tp: (tp[0], str(tp[1])))[1]
+    return files[0][1]
 
 
-def _find_events_export(root: Path) -> Path | None:
-    """Beside the nav export, and session-level in the same way."""
-    from .events import find_events_file
-    return find_events_file(root)
+def _find_nav_export(root: Path, run_stamp: str = "") -> Path | None:
+    """This run's ascii-output.txt under SBGData/**/export/ - see
+    pick_session_file. One export usually covers several runs of a session."""
+    return pick_session_file(_session_files(root, NAV_EXPORT_NAME), run_stamp)
+
+
+def _find_events_export(root: Path, run_stamp: str = "") -> Path | None:
+    """This run's Events-output.txt, chosen by the same session rule as the
+    nav export so the two always come from the same Qinertia processing."""
+    from .events import EVENTS_FILENAME
+    return pick_session_file(_session_files(root, EVENTS_FILENAME), run_stamp)
 
 
 def _daily_entries(root: Path, daily_path: Path | None = None) -> dict:
@@ -325,8 +379,10 @@ def discover_runs(root: Path, calibrations_dir: Path | None = None,
     lever_arms = lever_arms if lever_arms.is_file() else None
     root = Path(root)
     registered = daily_stamps(root, daily_path) if registered_only else None
-    nav_export = _find_nav_export(root)
-    events_export = _find_events_export(root)
+    # every session's exports, found once; each run picks its own below
+    from .events import EVENTS_FILENAME
+    nav_files = _session_files(root, NAV_EXPORT_NAME)
+    event_files = _session_files(root, EVENTS_FILENAME)
     calibration = find_pave_calibration(calibrations_dir)
     runs: list[RunPaths] = []
     stamps, paired, sbg_dirs = _run_stamps_and_loggers(root)
@@ -361,8 +417,8 @@ def discover_runs(root: Path, calibrations_dir: Path | None = None,
         else:
             p[KEY_EVENT_A] = p[KEY_UTC_TIME] = p[KEY_DMI] = None
 
-        p[KEY_NAV_EXPORT] = nav_export
-        p[KEY_EVENTS_EXPORT] = events_export
+        p[KEY_NAV_EXPORT] = pick_session_file(nav_files, stamp)
+        p[KEY_EVENTS_EXPORT] = pick_session_file(event_files, stamp)
         p[KEY_CALIBRATION] = calibration
         p[KEY_LEVER_ARMS] = lever_arms
 
@@ -405,7 +461,8 @@ class OverrideStore:
 
     def _save(self) -> None:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        self.store_path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+        from .atomic import atomic_write_text
+        atomic_write_text(self.store_path, json.dumps(self._data, indent=2))
 
     def set(self, root: str, run_id: str, key: str, path: Path) -> None:
         self._data.setdefault(self._scope(root, run_id), {})[key] = str(path)
