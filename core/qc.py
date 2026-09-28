@@ -332,7 +332,10 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
     pr = ParsedRun(run=run)
     pr.cameras = {}
 
-    def attempt(check_id: str, name: str, key: str, fn):
+    def attempt(check_id: str, name: str, key: str, fn, blocks: tuple = None):
+        """`blocks` scopes a FAIL to the deliverables this file actually
+        feeds. None blocks everything, which is right for the files every
+        position depends on (triggers, clock, trajectory, lever arms)."""
         path = run.get(key)
         if path is None:
             return None
@@ -345,7 +348,8 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
             sev = Severity.WARN if key in disc.OPTIONAL_KEYS else Severity.FAIL
             suffix = ("  (optional — GPS writing does not use it; viewer features "
                       "disabled for this run)") if sev is Severity.WARN else ""
-            report.add(check_id, name, sev, str(exc) + suffix)
+            report.add(check_id, name, sev, str(exc) + suffix,
+                       blocks=blocks if sev is Severity.FAIL else None)
             return None
 
     pr.images = attempt("format.images", "Image folder scan", disc.KEY_IMAGES, ImageSet.scan)
@@ -373,8 +377,17 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
     pr.triggers_sbg_us = attempt("format.event_a", "eventOutA.txt", disc.KEY_EVENT_A, parse_event_triggers)
     pr.utc = attempt("format.utc_time", "utcTime.txt", disc.KEY_UTC_TIME, UtcTable.parse)
     pr.dmi = attempt("format.dmi", "DmiStationEx CSV", disc.KEY_DMI, DmiTable.parse)
-    pr.gocator_l = attempt("format.gocator_l", "Gocator L CSV", disc.KEY_GOCATOR_L, GocatorIndex.build)
-    pr.gocator_r = attempt("format.gocator_r", "Gocator R CSV", disc.KEY_GOCATOR_R, GocatorIndex.build)
+    # A laser file that will not parse holds back THAT laser only. Images are
+    # placed by trigger time and need neither laser's profiles; until
+    # 2026-09-24 this FAIL was unscoped, so one bad right-laser CSV
+    # (20260816.122732: ptpTimestamp not strictly increasing) cost the run
+    # every image, the table and the good left laser too. The images still
+    # need a PTP solve from the OTHER laser to exist - if neither parses,
+    # alignment does not run and the run is flagged as before.
+    pr.gocator_l = attempt("format.gocator_l", "Gocator L CSV", disc.KEY_GOCATOR_L,
+                           GocatorIndex.build, blocks=(TARGET_GOCATOR_L,))
+    pr.gocator_r = attempt("format.gocator_r", "Gocator R CSV", disc.KEY_GOCATOR_R,
+                           GocatorIndex.build, blocks=(TARGET_GOCATOR_R,))
     pr.calibration = attempt("format.calibration", "Calibration YAML", disc.KEY_CALIBRATION, CameraCalibration.load)
     pr.lever_arms = attempt("format.lever_arms", "Lever-arm file", disc.KEY_LEVER_ARMS,
                             load_lever_arms_file)

@@ -293,9 +293,32 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData) -> MatchRe
                 "run looks inconsistent; refusing to match"
             ),
         )
+    # The triggers of the images already set aside are NOT free to hand out.
+    #
+    # "The images that remain are the tail" is only true when every image
+    # was placed. A run with no Events-output.txt keeps its first photo
+    # UNPLACED (it fired before ACS logged triggers), so after the first
+    # batch the folder is [unplaced head, ..., tail] with the set-aside
+    # block cut out of the MIDDLE. Tail-anchoring with k = folder - triggers
+    # then slid the unplaced head onto the set-aside image's trigger: on
+    # 20260816_RevRunsBar a second pass gave all 14 first photos another
+    # image's GPS and that image's name (2026-09-24).
+    #
+    # The set-aside images always hold the FIRST n_set_aside placed
+    # triggers - they are the ones before the section start - so those
+    # triggers stay unassigned here. On a first pass n_set_aside is 0 and
+    # nothing changes; on a re-run where every image was placed the tail
+    # mapping is unchanged too, since no remaining image wanted them.
+    # `unexplained` is the run's ORIGINAL images-minus-triggers. When it is
+    # negative the first -unexplained triggers never had an image, so the
+    # placed ones - and with them the set-aside block - start after those.
+    n_aside = int(getattr(images, "n_set_aside", 0) or 0)
+    first_free = max(0, -unexplained) + n_aside
     trigger_for_image = np.full(n_img, -1, dtype=np.int64)
     for i in range(n_trg):
         j = i + k
+        if i < first_free:
+            continue
         if 0 <= j < n_img:
             trigger_for_image[j] = i
     matched_j = np.where(trigger_for_image >= 0)[0]

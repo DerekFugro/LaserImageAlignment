@@ -272,6 +272,9 @@ class BatchReport:
     # Images put back after a batch was killed mid-rename. Reported loudly:
     # they were invisible until now, and their run may have been refused.
     recovered: list[str] = field(default_factory=list)
+    # Camera folders whose BeforeCollection/ images were brought back so a
+    # re-run processes the run whole (see _restore_set_aside).
+    restored: list[str] = field(default_factory=list)
     # What this batch was allowed to write. A dry run (all three off) produces
     # a report that otherwise reads exactly like a successful one, down to
     # "every deliverable was written" - which is the opposite of the truth, and
@@ -410,6 +413,10 @@ class BatchReport:
         # single-day collection's report must read exactly as it always has.
         if self.daily_path:
             lines[-1:] = [f"daily:   {self.daily_path}", ""]
+        # A re-run says so: the set-aside images were processed again.
+        if self.restored:
+            lines[-1:] = [f"re-run:  set-aside images brought back and processed "
+                          f"again - {'; '.join(self.restored)}", ""]
         # A number in the lever-arm file that the parser did not understand is
         # a number the app is NOT using while the file says otherwise. It has
         # to be visible here: on 2026-09-04 the file said the lens height was
@@ -819,6 +826,16 @@ def process_collection(root: Path, calibrations_dir: Path | None = None,
     rep_pf = preflight(root, calibrations_dir=calibrations_dir,
                        overrides=overrides, daily_path=daily_path)
     skip_ids = {r.run_id for r in rep_pf.not_ready}
+    # A RE-RUN starts from the run as it was collected: images set aside by
+    # an earlier batch come back into the camera folder, get matched,
+    # positioned and tabled with everything else, and the last step sets
+    # aside whatever is before the section this time. Only for runs that are
+    # about to be processed - never another day's, never a skipped run - and
+    # never on a dry run.
+    restored_dirs: list[Path] = []
+    if write_images:
+        report.restored, restored_dirs = _restore_set_aside(
+            root, {r.run_id for r in rep_pf.ready})
     runs = disc.discover_runs(root, calibrations_dir=calibrations_dir,
                               overrides=overrides, daily_path=daily_path)
     # what was on disk but not in the Daily file, so the report can say so once
@@ -881,6 +898,17 @@ def process_collection(root: Path, calibrations_dir: Path | None = None,
             _rename_to_section_distance(root, report)
         except OSError as exc:
             report.rename_error = str(exc)
+        # Whatever happened above - a run whose rename was skipped (held
+        # images, no Daily row) or a rename that stopped on a locked file -
+        # an image brought back for this pass must not be left in the camera
+        # folder under a before-the-section name. The move is driven by the
+        # name, so where the rename already did it this finds nothing.
+        from .rename import move_before_collection
+        for d in restored_dirs:
+            try:
+                move_before_collection(d)
+            except OSError as exc:
+                report.rename_error = report.rename_error or str(exc)
     else:
         for o in report.outcomes:
             o.notes.append("RENAME skipped: images were not written this run")
@@ -935,6 +963,35 @@ def _recover_interrupted_renames(root: Path, skip: set[str] | None = None,
         out += [f"{where}/{n}" for n in got]
         out += [f"{where}: {p}" for p in problems]
     return out
+
+
+def _restore_set_aside(root: Path, run_ids: set) -> tuple[list[str], list[Path]]:
+    """Bring each processed run's BeforeCollection/ images back into their
+    camera folders (see rename.restore_set_aside). Returns (report lines,
+    the camera folders touched) - the folders so the end of the batch can
+    make sure every before-the-section image goes back where it belongs.
+    Only the given runs: another day's folders, and a run preflight refused,
+    are left exactly as they are."""
+    from .formats import BEFORE_DIR
+    from .rename import restore_set_aside
+
+    lines: list[str] = []
+    touched: list[Path] = []
+    images = Path(root) / "Images"
+    if not images.is_dir():
+        return lines, touched
+    for cam_dir in sorted(p for p in images.glob("*/*") if p.is_dir()):
+        if cam_dir.name == BEFORE_DIR or cam_dir.parent.name not in run_ids:
+            continue
+        if not (cam_dir / BEFORE_DIR).is_dir():
+            continue
+        moved, problems = restore_set_aside(cam_dir)
+        where = f"{cam_dir.parent.name}/{cam_dir.name}"
+        if moved:
+            touched.append(cam_dir)
+            lines.append(f"{where}: {len(moved)} image(s)")
+        lines += [f"{where}: {p}" for p in problems]
+    return lines, touched
 
 
 def _refresh_alignment_csvs(report: BatchReport) -> None:

@@ -413,6 +413,44 @@ def move_before_collection(folder: Path, dry_run: bool = False) -> tuple[int, li
     return len(moved), problems
 
 
+def restore_set_aside(folder: Path) -> tuple[list, list]:
+    """Bring every image in BeforeCollection/ back into the camera folder.
+    Returns (moved names, problems).
+
+    The first step of a RE-RUN, so the batch sees the run exactly as the
+    first run did. Until 2026-09-27 set-aside images were never looked at
+    again: a second pass dropped their rows from the alignment CSV, left
+    them with the OLD trajectory's GPS and name when the export had been
+    reprocessed, could never move one back across the section start - and
+    with an unplaced first photo it matched the wrong image to their
+    triggers (20260816_RevRunsBar). The batch's last step sets aside again
+    whatever is before the section THIS time, from the names it gives now.
+
+    Nothing is ever written over: a name already taken in the camera folder
+    leaves that image where it is and says so. Their manifest rows already
+    exist (_rows_for_files_not_seen keeps them), so the scan still finds
+    each image's original odometer counter.
+    """
+    folder = Path(folder)
+    aside = folder / BEFORE_DIR
+    if not aside.is_dir():
+        return [], []
+    moved, problems = [], []
+    for p in sorted(aside.glob("*.jpg")):
+        target = folder / p.name
+        if target.exists():
+            problems.append(f"{p.name}: the camera folder already holds that "
+                            "name - left in " + BEFORE_DIR)
+            continue
+        os.rename(p, target)
+        moved.append(p.name)
+    try:
+        aside.rmdir()           # only succeeds when it is now empty
+    except OSError:
+        pass
+    return moved, problems
+
+
 def undo_renames(folder: Path) -> tuple[int, list]:
     """Put every renamed file back, driven purely by the manifest.
     The manifest itself is kept (renamed to .undone) as the record."""

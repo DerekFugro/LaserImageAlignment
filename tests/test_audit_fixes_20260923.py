@@ -169,3 +169,113 @@ def test_the_temp_name_is_nothing_the_rename_recovery_would_touch():
     from core.rename import TEMP_SUFFIX
     assert WRITING_SUFFIX != TEMP_SUFFIX
     assert not WRITING_SUFFIX.endswith(".tmp")
+
+
+# --- 5. a laser file that will not parse holds back that laser only ---------
+
+def test_bad_right_laser_csv_blocks_only_the_right_laser(tmp_path):
+    """20260816.122732: the right Gocator CSV had ptpTimestamp going
+    backwards. The parse FAIL was unscoped, so it blocked every image, the
+    table and the good left laser. It must block gocator_R and nothing else."""
+    from core.qc import (QCReport, TARGET_GOCATOR_R, TARGET_IMAGES, TARGET_CSV,
+                         parse_all)
+    bad = tmp_path / "20260816T122732R.csv"
+    bad.write_text(
+        "frameIndex,timestamp,ptpTimestamp,encoder,numberOfProfilePoints,"
+        "numberOfValidPoints,bridgedValue,status,x0,z0\n"
+        "0,0,1000002000000,0,1,1,0,0,1.0,2.0\n"
+        "1,1,1000001000000,102,1,1,0,0,1.0,2.0\n"
+        "2,2,1000003000000,204,1,1,0,0,1.0,2.0\n", encoding="utf-8")
+    run = disc.RunPaths(run_id="20260816.122732", root=str(tmp_path),
+                        paths={disc.KEY_GOCATOR_R: bad})
+    report = QCReport(run_id=run.run_id)
+    pr = parse_all(run, report)
+    assert pr.gocator_r is None
+    assert any(c.check_id == "format.gocator_r" for c in report.failed)
+    blocked = report.blocked_targets()
+    assert TARGET_GOCATOR_R in blocked
+    assert TARGET_IMAGES not in blocked
+    assert TARGET_CSV not in blocked
+
+
+# --- 6. re-run with an unplaced first photo AND set-aside images -------------
+
+def _imgs(counters, n_aside):
+    import numpy as np
+    from core.formats import ImageSet
+    return ImageSet(dir="x", files=[f"{c:012d}.jpg" for c in counters],
+                    counter_mm=np.asarray(counters, dtype=np.int64),
+                    n_set_aside=n_aside)
+
+
+def _trigs(n):
+    import numpy as np
+    from core.alignment import TriggerData
+    d = np.arange(n, dtype=float) * 0.75
+    return TriggerData(sbg_us=np.arange(n, dtype=np.int64), utc_s=d.copy(),
+                       dist_m=d, spacing_m=np.diff(d), spacing_ok_frac=1.0,
+                       message="")
+
+
+def test_rerun_does_not_give_the_unplaced_first_photo_a_trigger():
+    """20260816_RevRunsBar: 42 photos, 41 triggers, no Events-output.txt.
+    Pass 1: photo 0 unplaced, photos 1-2 set aside, photos 3..41 placed on
+    triggers 2..40. Pass 2 sees [photo 0, photo 3..41] - 40 photos - and
+    must leave photo 0 unmatched instead of handing it trigger 1."""
+    from core.alignment import match_images_to_triggers
+    first = match_images_to_triggers(_imgs(range(750, 750 * 43, 750), 0), _trigs(41))
+    assert first.trigger_for_image[0] == -1
+    assert list(first.trigger_for_image[3:6]) == [2, 3, 4]
+
+    remaining = [750] + list(range(750 * 4, 750 * 43, 750))   # photo 0, 3..41
+    again = match_images_to_triggers(_imgs(remaining, 2), _trigs(41))
+    assert again.trigger_for_image[0] == -1                  # still unplaced
+    assert list(again.trigger_for_image[1:4]) == [2, 3, 4]    # same as pass 1
+    assert again.trigger_for_image[-1] == 40
+
+
+def test_rerun_with_every_photo_placed_is_unchanged():
+    """The 20260821 case: Events-output recovered the first trigger, so
+    nothing was unplaced. 623 photos, 4 set aside -> 619 left."""
+    from core.alignment import match_images_to_triggers
+    remaining = list(range(750 * 5, 750 * 624, 750))          # photos 4..622
+    m = match_images_to_triggers(_imgs(remaining, 4), _trigs(623))
+    assert m.trigger_for_image[0] == 4
+    assert m.trigger_for_image[-1] == 622
+    assert m.n_matched == 619
+
+
+# --- re-run: set-aside images come back before the batch looks at them -------
+
+def test_restore_set_aside_brings_images_back(tmp_path):
+    from core.rename import BEFORE_DIR, restore_set_aside
+    cam = tmp_path / "Rear"
+    aside = cam / BEFORE_DIR
+    aside.mkdir(parents=True)
+    (cam / "000000001000.jpg").write_bytes(b"a")
+    (aside / "-00000000500.jpg").write_bytes(b"b")
+    (aside / "-00000000100.jpg").write_bytes(b"c")
+    moved, problems = restore_set_aside(cam)
+    assert sorted(moved) == ["-00000000100.jpg", "-00000000500.jpg"]
+    assert problems == []
+    assert not aside.exists()                       # emptied and removed
+    assert (cam / "-00000000500.jpg").read_bytes() == b"b"
+
+
+def test_restore_set_aside_never_overwrites(tmp_path):
+    from core.rename import BEFORE_DIR, restore_set_aside
+    cam = tmp_path / "ROW"
+    aside = cam / BEFORE_DIR
+    aside.mkdir(parents=True)
+    (cam / "-00000000500.jpg").write_bytes(b"keep")
+    (aside / "-00000000500.jpg").write_bytes(b"aside")
+    moved, problems = restore_set_aside(cam)
+    assert moved == [] and len(problems) == 1
+    assert (cam / "-00000000500.jpg").read_bytes() == b"keep"
+    assert (aside / "-00000000500.jpg").read_bytes() == b"aside"
+
+
+def test_restore_set_aside_without_folder_is_a_no_op(tmp_path):
+    from core.rename import restore_set_aside
+    (tmp_path / "Rear").mkdir()
+    assert restore_set_aside(tmp_path / "Rear") == ([], [])
