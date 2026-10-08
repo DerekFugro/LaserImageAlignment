@@ -150,3 +150,38 @@ class TestTheReportSaysWhichDay:
         chosen = BatchReport(root="r", started_utc="2026-09-18T00:00:00+00:00",
                              daily_path=r"C:\c\20260822\Daily_ARAN104_20260822.csv")
         assert "daily:   C:\\c\\20260822\\Daily_ARAN104_20260822.csv" in chosen.to_text()
+
+
+# --- any van's Daily file (20261005: ARANSW1 wrote Daily_ARANSW1_<day>.csv) ---
+
+def _van_day(root: Path, van: str, day: str, rows: list[str]) -> Path:
+    folder = root / day
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"Daily_{van}_{day}.csv"
+    path.write_text(DAILY_HEADER + "".join(rows), encoding="utf-8-sig")
+    return path
+
+
+class TestAnyVan:
+    def test_another_van_is_found(self, tmp_path):
+        p = _van_day(tmp_path, "ARANSW1", "20261005", [_row("20261005.095340")])
+        assert list_daily_files(tmp_path) == [p]
+        assert find_daily_file(tmp_path) == p
+        assert daily_file_for_day(tmp_path, "20261005") == p
+
+    def test_days_sort_by_date_not_by_van(self, tmp_path):
+        late = _van_day(tmp_path, "AAA1", "20261006", [_row("20261006.090000")])
+        early = _van_day(tmp_path, "ZZZ9", "20261005", [_row("20261005.090000")])
+        assert list_daily_files(tmp_path) == [early, late]
+
+    def test_other_day_folder_files_are_not_daily_files(self, tmp_path):
+        folder = tmp_path / "20261005"
+        folder.mkdir()
+        for name in ("Daily_ARANSW1_20261005 - Copy.csv", "Daily_notes.csv",
+                     "ARANSW1_StatusMessages_20261005.csv", "QC_Video.csv"):
+            (folder / name).write_text("x", encoding="utf-8")
+        assert list_daily_files(tmp_path) == []
+
+    def test_the_old_van_still_works(self, tmp_path):
+        p = _van_day(tmp_path, "ARAN104", "20260821", [_row("20260821.133437")])
+        assert find_daily_file(tmp_path) == p

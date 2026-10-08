@@ -187,9 +187,9 @@ Flags:
   The batch report is still written, and says plainly which it was.
 - `--daily FILE` / `--day YYYYMMDD` — **which collection day**, for a folder
   that holds several. An upload can carry ten `YYYYMMDD` folders, each with its
-  own `Daily_ARAN104_*.csv`, while `Images\`, `GoCatorData\` and `SBGData\` hold
+  own `Daily_<van>_<day>.csv`, while `Images\`, `GoCatorData\` and `SBGData\` hold
   every day's runs together. `--daily` names the Daily file exactly; `--day`
-  finds `<collection>\<day>\Daily_ARAN104_<day>.csv`. The chosen day is used
+  finds `<collection>\<day>\Daily_<van>_<day>.csv`. The chosen day is used
   everywhere the Daily file is read — which runs are registered, Status X,
   the section starts the rename measures from, and `run_mapping.csv` — so a
   day's images are never named against another day's chainage. A path that
@@ -209,7 +209,7 @@ the rest carry on.
    `F:\Sidewalk\099_CollectedData\20260816_Routed_IMages0.75_gocatordata_23.98`).
    Runs are discovered from `Images/`, `GoCatorData/`, `SBGData/` by their
    shared `YYYYMMDD.HHMMSS` stamp, then filtered against the ACS **Daily
-   file** (`<YYYYMMDD>/Daily_ARAN104_*.csv`): a stamp with no row there was
+   file** (`<YYYYMMDD>/Daily_<van>_<YYYYMMDD>.csv`, any van - ARAN104, ARANSW1, ...): a stamp with no row there was
    never a section, and a row whose `Status` is X was a false start. Both are
    left alone and listed in `Processed/Alignment/run_mapping.csv` with the reason. With
    no Daily file present, nothing is filtered.

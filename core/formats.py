@@ -37,19 +37,14 @@ BEFORE_DIR = "BeforeCollection"
 # Confirmed with Derek 2026-08-20; ~3170 counts per camera trigger, stable to
 # ~1% across runs with no drift.
 #
-# The scale is CONFIGURED, not fitted (Derek's Gocator settings, 2026-08-20):
-#   0.235116 mm per encoder tic  ->  4253.1 counts/m
-#   scan trigger every 23.98 mm  ->  23.98 / 0.235116 = 102.0 tics
-# Verified in the data: median profile spacing in 20260817.175605L is exactly
-# 102 counts. The 4223.6 figure previously in the spec is 0.7% low.
+# The scale is per VEHICLE and is read from ACS's own Settings file for the
+# day - see core.acs_settings. Until 2026-10-08 the old cart's 0.235116
+# mm/tick was built in here, which was wrong for every other van.
 #
-# NOTE: the raw counts are never logged by the SBG — DmiStationEx carries the
+# NOTE: the raw counts are never logged by the SBG - DmiStationEx carries the
 # SBG's *estimated* distance, and post-processing outputs only velocity. The
 # Gocator's `encoder` column is the ONLY physical-wheel measurement recorded
 # anywhere in a collection.
-MM_PER_ENCODER_TIC = 0.235116
-GOCATOR_COUNTS_PER_M = 1000.0 / MM_PER_ENCODER_TIC     # 4253.1
-GOCATOR_SCAN_TRIGGER_MM = 23.98                        # = 102 tics
 
 
 class ParseError(Exception):
@@ -472,6 +467,8 @@ class GocatorIndex:
     n_valid: np.ndarray        # int32
     byte_offset: np.ndarray    # int64 offset of each data row in the file
     meta_cols: int = GOCATOR_META_COLS  # columns before x0 (grows once GPS is injected)
+    # set when one PTP clock step was corrected on load - see _repair_ptp_step
+    ptp_step: dict | None = None
 
     @classmethod
     def build(cls, path: Path) -> "GocatorIndex":
@@ -527,7 +524,9 @@ class GocatorIndex:
             meta_cols=meta_cols,
         )
         if len(idx.ptp_us) >= 2 and not np.all(np.diff(idx.ptp_us) > 0):
-            raise ParseError(path, "ptpTimestamp not strictly increasing")
+            idx.ptp_step = _repair_ptp_step(idx)
+            if idx.ptp_step is None:
+                raise ParseError(path, "ptpTimestamp not strictly increasing")
         return idx
 
     def __len__(self) -> int:
@@ -550,6 +549,60 @@ class GocatorIndex:
                 except ValueError:
                     raise ParseError(self.path, f"non-numeric profile point at pair {i // 2}")
         return np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+
+
+# One PTP clock step is corrected, anything else still refuses the file.
+#
+# 20261007.120330 left laser: profiles every 9.2 ms, and at frame 150 (1.4%
+# into the run) ptpTimestamp jumps back 13.85 ms - the profile is stamped
+# 4.65 ms BEFORE the one ahead of it - then runs perfectly for the other
+# 10,664 profiles. frameIndex keeps counting and the encoder keeps its steady
+# 145 counts per frame straight through, so the laser never stopped; only its
+# clock moved: a one-off PTP correction as it finished locking to the SBG.
+# Refusing the file cost the whole laser (10,813 profiles, no GPS) over 14 mm.
+# Derek, 2026-10-08: correct the step.
+#
+# Only when it is unmistakably that: exactly one backwards step, frames and
+# encoder continuous across it, the step no bigger than PTP_STEP_MAX_US, and
+# the file strictly increasing once corrected. The SHORTER side is moved onto
+# the longer side's clock, so the bulk of the run keeps its own timestamps.
+PTP_STEP_MAX_US = 50_000
+
+
+def _repair_ptp_step(idx: "GocatorIndex") -> dict | None:
+    ptp = idx.ptp_us
+    d = np.diff(ptp)
+    bad = np.where(d <= 0)[0]
+    if len(bad) != 1 or len(d) < 10:
+        return None
+    i = int(bad[0]) + 1                       # first row on the new clock
+    # the spacing either side of the step, not the whole file's: the scan
+    # interval follows speed, so a run-wide median misjudges the jump
+    near = d[max(i - 11, 0):i + 10]
+    near = near[near > 0]
+    expected = int(np.median(near if len(near) else d[d > 0]))
+    jump = int(ptp[i] - ptp[i - 1]) - expected   # negative: the clock went back
+    if abs(jump) > PTP_STEP_MAX_US:
+        return None
+    if int(idx.frame[i] - idx.frame[i - 1]) != 1:
+        return None
+    de = np.diff(idx.encoder)
+    notch = float(np.median(de[de > 0])) if np.any(de > 0) else 0.0
+    step_enc = float(idx.encoder[i] - idx.encoder[i - 1])
+    if notch <= 0 or not (0.5 * notch <= step_enc <= 1.5 * notch):
+        return None
+    fixed = ptp.copy()
+    if i <= len(ptp) - i:                     # the part before the step is shorter
+        fixed[:i] += jump
+        moved, side = i, "before"
+    else:
+        fixed[i:] -= jump
+        moved, side = len(ptp) - i, "after"
+    if not np.all(np.diff(fixed) > 0):
+        return None
+    idx.ptp_us = fixed
+    return {"frame": int(idx.frame[i]), "row": i, "jump_us": jump,
+            "moved_rows": moved, "side": side, "n_rows": len(ptp)}
 
 
 # ---------------------------------------------------------------------------

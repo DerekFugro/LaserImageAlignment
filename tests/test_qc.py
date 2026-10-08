@@ -99,7 +99,8 @@ def park_after_first_trigger(hold_s=156.0, wander_m=1.5, run_m=30.0,
 
 
 def run_checks(**parsed_kwargs):
-    run = disc.RunPaths(run_id="20260817.175738", root="synthetic")
+    root = parsed_kwargs.pop("root", "synthetic")
+    run = disc.RunPaths(run_id="20260817.175738", root=str(root))
     pr = ParsedRun(run=run)
     pr.cameras = {}
     triggers = parsed_kwargs.pop("triggers", None)
@@ -187,6 +188,17 @@ def gocator(encoder):
     )
 
 
+def acs_settings_file(root, day, pulses_per_m, van="ARAN104"):
+    folder = root / day
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{van}_Settings_{day}.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<ARANSettings><Calibrations>'
+        f'<DMICalibration><DMIScaleFactor DataType="float">{pulses_per_m}'
+        '</DMIScaleFactor><EffectiveDate DataType="datetime">Oct  2 2026  6:47PM'
+        '</EffectiveDate></DMICalibration></Calibrations></ARANSettings>',
+        encoding="utf-8")
+
+
 class TestGocatorEncoderMessage:
     def test_shutdown_artifact_is_named_as_such(self):
         enc = np.arange(2512, dtype=np.int64) * 100
@@ -202,12 +214,13 @@ class TestGocatorEncoderMessage:
         # The encoder is a health signal, never a position source.
         assert c.impact_pct == 0.0
 
-    def test_mid_run_drops_are_not_excused(self):
+    def test_mid_run_drops_are_not_excused(self, tmp_path):
         """Several decreases scattered through a run really are spread."""
         enc = np.arange(500, dtype=np.int64) * 100
         for i in (120, 200, 310):
             enc[i] -= 5000
-        checks = run_checks(gocator_l=gocator(enc))
+        acs_settings_file(tmp_path, "20260817", 1063.17)
+        checks = run_checks(gocator_l=gocator(enc), root=tmp_path)
         c = checks["content.gocator_L_encoder"]
         assert c.values["terminal_only"] is False
         assert c.values["n_drops"] == 3

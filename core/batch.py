@@ -1028,7 +1028,7 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
     daily_path = find_daily_file(root, chosen)
     daily = parse_daily(daily_path) if daily_path else {}
     if not daily:
-        where = "no Daily_ARAN104 file in this collection"
+        where = "no Daily_<van>_<day>.csv file in this collection"
         for o in report.outcomes:
             if o.status in ("written", "partial"):
                 o.notes.append(f"RENAME skipped: {where} — names left as they are")

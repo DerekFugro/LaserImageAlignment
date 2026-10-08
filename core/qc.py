@@ -18,7 +18,7 @@ from .alignment import (
 )
 from .formats import (
     DmiTable, GocatorIndex, ImageSet, NavTable, ParseError, UtcTable,
-    GOCATOR_COUNTS_PER_M, IMAGE_STEP_MM,
+    IMAGE_STEP_MM,
 )
 
 
@@ -388,6 +388,23 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
                            GocatorIndex.build, blocks=(TARGET_GOCATOR_L,))
     pr.gocator_r = attempt("format.gocator_r", "Gocator R CSV", disc.KEY_GOCATOR_R,
                            GocatorIndex.build, blocks=(TARGET_GOCATOR_R,))
+    for side, goc in (("L", pr.gocator_l), ("R", pr.gocator_r)):
+        step = getattr(goc, "ptp_step", None) if goc is not None else None
+        if step:
+            report.add(
+                f"format.gocator_{side.lower()}_ptp_step", f"Gocator {side} PTP clock step",
+                Severity.WARN,
+                f"{step['moved_rows']} of {step['n_rows']} profiles moved by "
+                f"{abs(step['jump_us']) / 1000:.2f} ms (~{abs(step['jump_us']) / 1000:.0f} mm "
+                f"at 1 m/s) - the laser's PTP clock stepped back "
+                f"{abs(step['jump_us']) / 1000:.2f} ms at frame {step['frame']} "
+                f"({100.0 * step['row'] / step['n_rows']:.1f}% into the run) while frames "
+                f"and encoder ran on unbroken, so the {step['side']}-step profiles were "
+                f"put on the same clock as the rest. Check the Gocator shows PTP locked "
+                f"before a run starts",
+                impact_pct=100.0 * step["moved_rows"] / step["n_rows"],
+                frame=step["frame"], jump_us=step["jump_us"],
+                moved_rows=step["moved_rows"])
     pr.calibration = attempt("format.calibration", "Calibration YAML", disc.KEY_CALIBRATION, CameraCalibration.load)
     pr.lever_arms = attempt("format.lever_arms", "Lever-arm file", disc.KEY_LEVER_ARMS,
                             load_lever_arms_file)
@@ -514,7 +531,7 @@ def check_acs_qc_video(pr: ParsedRun, report: QCReport,
         # are different statements and must not print the same.
         report.add(cid, name, Severity.INFO,
                    "no QC_Video.csv in the day folder - nothing to cross-check "
-                   "against (ACS writes it beside Daily_ARAN104_*.csv)")
+                   "against (ACS writes it beside Daily_<van>_<day>.csv)")
         return
 
     acs = video_gaps_for_run(read_qc_video(path), pr.run.run_id)
@@ -624,6 +641,19 @@ def check_content(pr: ParsedRun, report: QCReport,
                   triggers: TriggerData | None = None,
                   ptp_l: PtpOffsetResult | None = None,
                   ptp_r: PtpOffsetResult | None = None) -> None:
+    # The DMI calibration the van collected with, from ACS's Settings file
+    # for the day. It turns Gocator encoder counts into mm for the wording of
+    # the encoder check below and nothing else - no position depends on it.
+    from .acs_settings import dmi_for_run
+    acs_dmi, dmi_why = dmi_for_run(pr.run.root, pr.run.run_id)
+    counts_per_m = acs_dmi.gocator_counts_per_m if acs_dmi else None
+    report.add("content.acs_dmi", "ACS DMI calibration", Severity.INFO,
+               acs_dmi.describe() if acs_dmi else
+               f"{dmi_why} - encoder steps are given in counts, not mm",
+               pulses_per_m=acs_dmi.pulses_per_m if acs_dmi else None,
+               effective=acs_dmi.effective if acs_dmi else "",
+               gocator_mm_per_tick=acs_dmi.gocator_mm_per_tick if acs_dmi else None)
+
     # Every camera fires on the SAME trigger, so every camera must hold the
     # same number of photographs. When they disagree, one of them has lost
     # files — and that is worth saying by name, because the alternative is
@@ -905,15 +935,54 @@ def check_content(pr: ParsedRun, report: QCReport,
             # "440 m into a 465 m run" is a place you can drive to; "profile
             # 18435 of 19479" is a number the reader has to do arithmetic on
             # (Derek, 2026-09-13: "the warnings are hard to understand").
-            span_m = float(int(goc.encoder[-1]) - int(goc.encoder[0])) / GOCATOR_COUNTS_PER_M
-            at_m = span_m * first / max(len(de), 1)
-            if len(drops) == 1:
-                where = (f"at {at_m:.0f} m into a {span_m:.0f} m run "
-                         f"({100.0 * first / max(len(de), 1):.0f}% through)")
+            # Counts become metres only through the DMI calibration the van
+            # collected with (ACS's Settings file for the day). Without it the
+            # place is given as a share of the run - never from a built-in
+            # number, which is how the old cart's scale ended up on a new van.
+            # ...and only when this laser's own encoder agrees with it. The
+            # Gocator counting every edge (ACS x 4) held on ARAN104 from
+            # 2026-08-16 and on ARANSW1, but NOT in July / early August, when
+            # the sensor was set up differently (0.64-0.66 of ACS x 4). So the
+            # encoder span is checked against the distance the trajectory
+            # travelled while it was logging; more than 5% apart and the mm
+            # figures are left out rather than printed wrong.
+            side_cpm = counts_per_m
+            scale_note = ""
+            if side_cpm and ptp is not None and ptp.passed and pr.nav is not None:
+                dd = gocator_distances(goc, ptp, pr.nav)
+                dd = dd[np.isfinite(dd)]
+                travel = float(dd.max() - dd.min()) if len(dd) else 0.0
+                span = float(int(goc.encoder[-1]) - int(goc.encoder[0]))
+                if travel > 20.0 and span > 0:
+                    seen = span / travel
+                    if abs(seen / side_cpm - 1.0) > 0.05:
+                        scale_note = (f" Distances left out: ACS DMI x 4 is "
+                                      f"{side_cpm:.0f} counts/m but this laser's "
+                                      f"encoder ran {seen:.0f} counts/m along the "
+                                      f"trajectory.")
+                        side_cpm = None
+            n_de = max(len(de), 1)
+            pct_first = 100.0 * first / n_de
+            pct_last = 100.0 * last / n_de
+            if side_cpm:
+                span_m = float(int(goc.encoder[-1]) - int(goc.encoder[0])) / side_cpm
+                at_m = span_m * first / n_de
+                last_m = span_m * last / n_de
+                if len(drops) > 1 and round(at_m) == round(last_m):
+                    where = (f"{len(drops)} times at {at_m:.0f} m into a "
+                             f"{span_m:.0f} m run ({pct_first:.0f}% through)")
+                elif len(drops) == 1:
+                    where = (f"at {at_m:.0f} m into a {span_m:.0f} m run "
+                             f"({pct_first:.0f}% through)")
+                else:
+                    where = (f"{len(drops)} of them, between {at_m:.0f} m and "
+                             f"{span_m * last / n_de:.0f} m into a "
+                             f"{span_m:.0f} m run")
+            elif len(drops) == 1:
+                where = f"{pct_first:.0f}% through the run"
             else:
-                where = (f"{len(drops)} of them, between {at_m:.0f} m and "
-                         f"{span_m * last / max(len(de), 1):.0f} m into a "
-                         f"{span_m:.0f} m run")
+                where = (f"{len(drops)} of them, between {pct_first:.0f}% and "
+                         f"{pct_last:.0f}% through the run")
             # One trigger interval backwards is the signature of the wheel
             # dithering across a pulse edge while the vehicle is nearly
             # stopped, not of the vehicle rolling back: a real roll-back is
@@ -934,12 +1003,15 @@ def check_content(pr: ParsedRun, report: QCReport,
             else:
                 why = "spread through the run, so check for reverse travel or lost counts"
             dupes = len(drops) if one_notch else 0
-            msg = (f"wheel encoder ticked backwards {where}; largest {worst} counts "
-                   f"(~{abs(worst) / GOCATOR_COUNTS_PER_M * 1000:.0f} mm) — {why}. "
+            msg = (f"wheel encoder ticked backwards {where}; largest {worst} counts"
+                   + (f" (~{abs(worst) / side_cpm * 1000:.0f} mm)"
+                      if side_cpm else "")
+                   + f" — {why}. "
                    f"Profile positions come from PTP time, not the encoder, so "
                    f"nothing moves"
                    + (f"; leaves {dupes} duplicate scan line(s) out of {len(goc)}."
-                      if dupes else "."))
+                      if dupes else ".")
+                   + scale_note)
             report.add(f"content.gocator_{side}_encoder", f"Gocator {side} encoder",
                        Severity.WARN, msg,
                        # The encoder is a health signal, not a position source.

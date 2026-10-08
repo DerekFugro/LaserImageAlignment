@@ -77,7 +77,7 @@ def _daily(args) -> Path | None:
             days = [day_of_daily_file(p) for p in list_daily_files(root)]
             have = ", ".join(d for d in days if d) or "none"
             raise UsageError(
-                f"--day {args.day}: no Daily_ARAN104 file for that day under "
+                f"--day {args.day}: no Daily_<van>_<day>.csv file for that day under "
                 f"{root}. Days here: {have}")
         return path
     # Nobody chose. One day is the normal case and says nothing; several is
@@ -318,7 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "as before")
         sp.add_argument("--day", metavar="YYYYMMDD",
                         help="the same thing by day: <collection>/<day>/"
-                             "Daily_ARAN104_<day>.csv")
+                             "Daily_<van>_<day>.csv")
         sp.add_argument("--overrides", metavar="FILE",
                         help="where located paths are remembered. Default: the "
                              "same sidecar the viewer uses")

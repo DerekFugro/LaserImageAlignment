@@ -919,7 +919,7 @@ class MainWindow(QMainWindow):
         from core.daily import find_daily_file
         if find_daily_file(self.run_root, self.daily_path) is None:
             head += ("\n\nImage filenames will be LEFT AS THEY ARE — this "
-                     "collection has no Daily_ARAN104 file, so there is no "
+                     "collection has no Daily_<van>_<day>.csv file, so there is no "
                      "section start to measure from.")
         else:
             head += ("\n\nImage filenames will be REPLACED by the corrected "

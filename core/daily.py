@@ -1,6 +1,6 @@
 """The ACS day folder: the section register, and ACS's own QC.
 
-ACS writes <root>/<YYYYMMDD>/Daily_ARAN104_<YYYYMMDD>.csv with one row per
+ACS writes <root>/<YYYYMMDD>/Daily_<van>_<YYYYMMDD>.csv with one row per
 run, keyed by the run stamp in [brackets]. It is the authority on which LRS
 section each run collected, which direction, the From/To chainage (km), and
 the GPS point where the section start sits. That makes it the ANCHOR for
@@ -66,8 +66,20 @@ def list_daily_files(root: Path) -> list[Path]:
     folders, each with its own Daily file, while Images/, GoCatorData/ and
     SBGData/ hold every day's runs together. This is how a caller finds out
     which days are there so somebody can choose one.
+
+    The middle of the name is the van: ARAN104 writes Daily_ARAN104_<day>.csv,
+    ARANSW1 writes Daily_ARANSW1_<day>.csv (20261005). Until 2026-10-06 only
+    ARAN104 was looked for, so another van's day had NO Daily file: every SBG
+    logger became a run, X rows were processed and nothing was renamed.
+    Any van is accepted; the name must still end _<YYYYMMDD>.csv.
     """
-    return sorted(Path(root).glob("*/Daily_ARAN104_*.csv"))
+    hits = [p for p in Path(root).glob("*/Daily_*.csv")
+            if DAILY_NAME_RE.match(p.name)]
+    return sorted(hits, key=lambda p: (day_of_daily_file(p), str(p)))
+
+
+# Daily_<van>_<YYYYMMDD>.csv - the van is any name without an underscore.
+DAILY_NAME_RE = re.compile(r"^Daily_[^_]+_\d{8}\.csv$", re.IGNORECASE)
 
 
 def day_of_daily_file(path: Path) -> str:
