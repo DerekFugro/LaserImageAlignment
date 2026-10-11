@@ -306,9 +306,8 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData,
 
     photo_lag = 1 for a camera with a trigger delay in the lever-arm file
     (Derek, 2026-10-11): its photo n is the picture taken `delay` after
-    trigger n-1, so photo 1 belongs to the trigger before logging began - the
-    one recovered from Events-output when that file is there, otherwise
-    photo 1 stays unplaced.
+    trigger n-1, and its photo 1 is the frame the camera makes when it starts
+    (no trigger), so photo 1 stays unplaced.
 
     WHY ordinal, not distance-fitting: both sequences ARE the same physical
     trigger events in order, but their distances are measured differently.
@@ -421,7 +420,11 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData,
              + (f", {n_trg - int(trigger_for_image.max()) - 1} trigger(s) after the last "
                 f"photo got none (cameras stopped while moving?)"
                 if n_matched and int(trigger_for_image.max()) < n_trg - 1 else "")
-             + (f", {n_unmatched} photo(s) beyond the last trigger" if n_unmatched else "")
+             + (f", photo 1 is the camera start-up frame (no trigger, no GPS)"
+                if photo_lag and n_img and int(trigger_for_image[0]) < 0 else "")
+             + (f", {int(np.sum(trigger_for_image[1 if photo_lag else 0:] < 0))} photo(s) "
+                f"beyond the last trigger"
+                if np.any(trigger_for_image[1 if photo_lag else 0:] < 0) else "")
              if mode == "head" else
              f"ordinal match, shift k = {k:+d} (tail-anchored): {n_matched}/{n_img} images matched"
              + (f", {n_unmatched} unmatched at the start (pre-collection triggers)" if k > 0 else

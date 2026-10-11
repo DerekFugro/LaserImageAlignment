@@ -220,14 +220,31 @@ class RenameOutcome:
         return [str(n).startswith("-") for n in self.final_names]
 
 
+STARTUP_PREFIX = "-startup_"
+
+
+def startup_name(original: str) -> str:
+    """Name for the camera's start-up frame: the leading minus sends it to
+    BeforeCollection like any pre-section photo, the word says it is not a
+    distance, and the original odometer name is kept inside it."""
+    return f"{STARTUP_PREFIX}{Path(original).stem.lstrip('-')}.jpg"
+
+
 def rename_camera_folder(folder: Path, files: list[str], distance_mm,
                          entry: DailyEntry, run_id: str, camera: str,
-                         dry_run: bool = False) -> RenameOutcome:
+                         dry_run: bool = False,
+                         startup: set | None = None) -> RenameOutcome:
     """Plan every move, write the manifest, then move via temporary names.
+
+    `startup`: names (as they are now) of the camera's start-up frame - photo
+    1 of a camera with a trigger delay. It has no trigger, so no position; it
+    is renamed `-startup_<original>.jpg`, which move_before_collection files
+    in BeforeCollection (Derek, 2026-10-11).
 
     Idempotent: a file already sitting on its correct name is a no-op, so a
     second batch over a renamed folder changes nothing.
     """
+    startup = set(startup or ())
     folder = Path(folder)
     out = RenameOutcome(run_id=run_id, camera=camera, section=str(entry.section))
     origin = true_origins(folder)
@@ -257,6 +274,16 @@ def rename_camera_folder(folder: Path, files: list[str], distance_mm,
         original = origin.get(name, name)
         stem = Path(original).stem.lstrip("-")
         digits = len(stem) if stem.isdigit() else DEFAULT_DIGITS
+        if name in startup:
+            new = startup_name(original)
+            note = "camera start-up frame - no trigger, no GPS"
+            rows.append((original, new, entry.section, "", run_id, camera, note))
+            if new == name:
+                out.renamed += 1
+            else:
+                out.final_names[index_of[name]] = new
+                plan.append((name, new))
+            continue
         if not np.isfinite(mm):
             rows.append((original, held_as(original), entry.section, "",
                          run_id, camera, "no position — not renamed"))
@@ -400,7 +427,9 @@ def move_before_collection(folder: Path, dry_run: bool = False) -> tuple[int, li
             rows = list(csv.DictReader(fh))
         for r in rows:
             if r["new_name"] in names:
-                r["note"] = f"moved to {BEFORE_DIR}/ (before the section start)"
+                r["note"] = (f"camera start-up frame - no trigger, no GPS; moved to {BEFORE_DIR}/"
+                             if r["new_name"].startswith(STARTUP_PREFIX) else
+                             f"moved to {BEFORE_DIR}/ (before the section start)")
         with atomic_open(man) as fh:
             w = csv.DictWriter(fh, fieldnames=MANIFEST_COLUMNS)
             w.writeheader()

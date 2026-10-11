@@ -19,7 +19,7 @@ from . import discovery as disc
 from .atomic import atomic_open, atomic_write_text
 from .alignment import PTP_PASS_MAX_DEV_S, scan_ground_positions
 from .formats import GOCATOR_META_COLS, TAI_UTC_NOMINAL_S
-from .geotag import ensure_piexif, geotag_image, inject_gocator_gps
+from .geotag import clear_gps, ensure_piexif, geotag_image, inject_gocator_gps
 from .pipeline import RunResult, export_csv, process_run
 from .qc import TARGET_CSV, TARGET_IMAGES, TARGETS
 
@@ -1076,8 +1076,9 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
             mm = section_distance_mm(
                 al, nav, entry, None if arm_xyz is None else -float(arm_xyz[0]),
                 start_utc_s=start_utc)
+            startup = {al.images.files[j] for j in _startup_frames(al, arms, cam_name)}
             r = rename_camera_folder(Path(al.images.dir), al.images.files,
-                                     mm, entry, o.run_id, cam_name)
+                                     mm, entry, o.run_id, cam_name, startup=startup)
             o.renames[cam_name] = r
             o.notes.append(f"RENAME {cam_name}: {r.renamed} named by distance "
                            f"into section {entry.section}, {r.skipped} kept; "
@@ -1094,6 +1095,18 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
                                f"before the section — moved to BeforeCollection/")
             for e in probs:
                 o.warnings.append(f"before-collection {cam_name}: {e}")
+
+
+def _startup_frames(al, arms, cam_name) -> list[int]:
+    """Indices of the camera's start-up frame in this alignment: photo 1
+    (odometer counter 750 mm) of a camera with a trigger delay in the
+    lever-arm file, left unplaced by the matcher. It has no trigger, so no
+    position (Derek, 2026-10-11)."""
+    if cal.trigger_delay_s(arms, cam_name) is None:
+        return []
+    ordinal = np.rint(np.asarray(al.images.counter_mm, dtype=np.float64) / 750.0)
+    return [j for j in range(len(al.images))
+            if ordinal[j] == 1 and not np.isfinite(al.utc_s[j])]
 
 
 def _process_one(run: disc.RunPaths, write_images: bool, write_gocator: bool,
@@ -1174,7 +1187,21 @@ def _process_one(run: disc.RunPaths, write_images: bool, write_gocator: bool,
             heading = nav.heading_at(cam_al.utc_s) if nav is not None else None
             speed = nav.speed_at(cam_al.utc_s) if nav is not None else None
             tagged = skipped = 0
+            startup = set(_startup_frames(cam_al, result.parsed.lever_arms, cam_name))
+            for j in startup:
+                # an earlier pass may have stamped it under the old pairing
+                try:
+                    clear_gps(cam_al.images.path(j))
+                except Exception as exc:
+                    out.warnings.append(
+                        f"start-up frame {cam_name}/{cam_al.images.files[j]}: "
+                        f"could not clear old GPS: {exc}")
+            if startup:
+                out.notes.append(f"{cam_name}: photo 1 is the camera start-up frame "
+                                 "(no trigger) - no GPS, filed in BeforeCollection")
             for j in range(len(cam_al.images)):
+                if j in startup:
+                    continue
                 if not (np.isfinite(cam_al.lat_deg[j]) and np.isfinite(cam_al.lon_deg[j])):
                     skipped += 1
                     continue

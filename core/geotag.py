@@ -85,6 +85,34 @@ def _rational(value: float, den: int = 1000) -> tuple[int, int]:
     return (int(round(float(value) * den)), den)
 
 
+def clear_gps(path: Path) -> bool:
+    """Remove the GPS EXIF block from a JPEG, in place. True when one was
+    removed. For the camera's start-up frame (no trigger, so no position): an
+    earlier pass under the old pairing may have stamped it, and a stale
+    position is worse than none."""
+    import piexif
+
+    path = Path(path)
+    try:
+        exif = piexif.load(str(path))
+    except Exception:
+        return False
+    if not exif.get("GPS"):
+        return False
+    exif["GPS"] = {}
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        piexif.insert(piexif.dump(exif), str(path), str(tmp))
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return True
+
+
 def geotag_image(path: Path, lat_deg: float, lon_deg: float, alt_m: float,
                  utc_epoch_s: float, heading_deg: float | None = None,
                  speed_ms: float | None = None) -> None:

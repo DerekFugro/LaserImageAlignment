@@ -242,36 +242,23 @@ def _recover_pre_collection_triggers(parsed, report) -> tuple[np.ndarray, int]:
     logged = np.asarray(parsed.triggers_sbg_us, dtype=np.int64)
     from .alignment import PAIRING_MODE
     if PAIRING_MODE == "head":
-        # A camera with a trigger delay pairs photo n with trigger n-1, so its
-        # photo 1 belongs to the trigger just BEFORE logging began. Recover
-        # that one from Events-output; with no delay camera nothing is needed.
+        # Nothing is put in front of the logged triggers. A camera with a
+        # trigger delay pairs photo n with trigger n-1, and its photo 1 is the
+        # frame the camera makes when acquisition STARTS - no trigger at all.
+        # The camera log proves it (2026-10-10, all 7 stick runs): the camera
+        # started 1.5-10 s AFTER the last trigger before logging and 0.9-9.5 s
+        # before the first logged one, with no trigger in between. So photo 1
+        # gets no position (Derek, 2026-10-11): it is filed in BeforeCollection
+        # under a start-up name, with no GPS (batch.py / rename.py).
         lagged = [c for c in (parsed.cameras or {})
                   if cal.trigger_delay_s(parsed.lever_arms, c) is not None]
-        if not lagged:
-            report.add("align.pre_collection_triggers", "Pre-collection triggers",
-                       Severity.PASS,
-                       "not used - pairing counts from the first logged trigger "
-                       "(no extra front photo assumed)", n_recovered=0)
-            return logged, 0
-        if parsed.events is None or parsed.utc is None:
-            report.add("align.pre_collection_triggers", "Pre-collection triggers",
-                       Severity.WARN,
-                       "photo 1 belongs to the trigger before logging began "
-                       f"({', '.join(lagged)} trigger delay); add Qinertia's "
-                       "Events-output.txt to place it - without it photo 1 stays "
-                       "unplaced", n_missing=1)
-            return logged, 0
-        extra_utc, note = leading_trigger_utc_s(
-            parsed.events, parsed.utc.sbg_to_utc(logged), 1)
-        if len(extra_utc) == 0:
-            report.add("align.pre_collection_triggers", "Pre-collection triggers",
-                       Severity.WARN, note + " - photo 1 stays unplaced", n_missing=1)
-            return logged, 0
-        extra_us = utc_to_sbg_us(parsed.utc, extra_utc).astype(np.int64)
         report.add("align.pre_collection_triggers", "Pre-collection triggers",
-                   Severity.PASS, note + " (photo 1, camera trigger delay)",
-                   n_recovered=int(len(extra_us)))
-        return np.concatenate([extra_us, logged]), int(len(extra_us))
+                   Severity.PASS,
+                   ("not used - photo 1 is the camera start-up frame (no trigger), "
+                    f"left without GPS ({', '.join(lagged)})" if lagged else
+                    "not used - pairing counts from the first logged trigger "
+                    "(no extra front photo assumed)"), n_recovered=0)
+        return logged, 0
     counts = [full_count(im) for im in (parsed.cameras or {}).values()]
     if parsed.images is not None:
         counts.append(full_count(parsed.images))
