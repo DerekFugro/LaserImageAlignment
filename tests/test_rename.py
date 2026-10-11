@@ -8,6 +8,7 @@ import pytest
 from core.daily import DailyEntry, find_daily_file, parse_daily
 from core.rename import (MANIFEST_NAME, rename_camera_folder,
                          section_distance_mm, station_name, undo_renames)
+from core.rename import DAILY_START_WARN_M, daily_start_miss_m  # noqa: E402
 
 
 # ---------------------------------------------------------------- station_name
@@ -141,13 +142,41 @@ def test_distance_anchor_uses_this_runs_pass_not_the_whole_session():
     assert mm[1] == pytest.approx(10_000, abs=1)
 
 
-def test_distance_refuses_a_bad_anchor():
+def test_a_bad_daily_point_no_longer_moves_the_names():
+    """Derek, 2026-10-09: count from where the SESSION started. A Daily start
+    point far from the path (~1.1 km east here) is reported, not used."""
     nav = _straight_north_nav()
-    # section start nowhere near the trajectory (~1.1 km east)
     entry = DailyEntry("r", "200180", "N", 12.4, 13.1,
                        lat_beg=45.0, lon_beg=-75.01)
     al = SimpleNamespace(utc_s=np.array([10.0, 20.0]))
-    assert np.all(np.isnan(section_distance_mm(al, nav, entry, arm_m=None)))
+    mm = section_distance_mm(al, nav, entry, arm_m=None)
+    assert mm == pytest.approx([0, 10_000], abs=1)
+    assert daily_start_miss_m(al, nav, entry) > 700
+
+
+def test_the_session_start_wins_over_a_daily_point_down_the_road():
+    """20261008.101916: the Daily point lay ON the route but 30.7 m past the
+    session start, and 42 real photos were set aside. Now the first trigger is
+    0 m and the Daily point only shows up as a miss distance."""
+    nav = _straight_north_nav()
+    entry = DailyEntry("r", "300000", "N", 0.0, 0.063,
+                       lat_beg=float(nav.lat_deg[40]), lon_beg=-75.0)  # 30 m on
+    triggers = SimpleNamespace(utc_s=np.arange(10.0, 60.0))
+    al = SimpleNamespace(utc_s=np.array([10.0, 11.0, 12.0]), triggers=triggers)
+    mm = section_distance_mm(al, nav, entry, arm_m=0.47)
+    assert mm == pytest.approx([-470, 530, 1530], abs=1)   # one photo before 0
+    assert daily_start_miss_m(al, nav, entry) == pytest.approx(30.0, abs=0.01)
+
+
+def test_a_loop_past_the_daily_point_does_not_move_the_start():
+    """20261008.111537 drove a loop back past its start; the old nearest-point
+    search anchored on the LATER pass, 493 m in. The session start cannot."""
+    nav = _straight_north_nav()
+    entry = DailyEntry("r", "300000", "N", 0.0, 0.5,
+                       lat_beg=float(nav.lat_deg[10]), lon_beg=-75.0)
+    al = SimpleNamespace(utc_s=np.array([10.0, 50.0]))
+    mm = section_distance_mm(al, nav, entry, arm_m=None)
+    assert mm == pytest.approx([0, 40_000], abs=1)
 
 
 # ------------------------------------------------------- rename + undo
@@ -338,9 +367,12 @@ def test_anchor_does_not_move_when_a_leading_image_is_recovered():
     entry = DailyEntry("r", "200180", "N", 12.4, 13.1,
                        lat_beg=float(nav.lat_deg[10]), lon_beg=-75.0)
     later = np.array([10.0, 20.0, 30.0])
-    without = section_distance_mm(SimpleNamespace(utc_s=later), nav, entry, None)
+    # the batch passes the first LOGGED trigger, which recovery never changes
+    without = section_distance_mm(SimpleNamespace(utc_s=later), nav, entry, None,
+                                  start_utc_s=10.0)
     with_lead = section_distance_mm(
-        SimpleNamespace(utc_s=np.concatenate([[9.0], later])), nav, entry, None)
+        SimpleNamespace(utc_s=np.concatenate([[9.0], later])), nav, entry, None,
+        start_utc_s=10.0)
     assert with_lead[1:] == pytest.approx(without, abs=1e-6)
 
 
@@ -364,12 +396,12 @@ def test_anchor_ignores_jitter_the_cart_made_while_parked():
     assert mm[1] == pytest.approx(10_000, abs=50)
 
 
-def test_a_daily_row_from_another_section_is_refused():
+def test_a_daily_row_far_off_the_path_is_reported():
     nav = _straight_north_nav()
     entry = DailyEntry("r", "200180", "N", 12.4, 13.1,
                        lat_beg=45.0, lon_beg=-75.001)      # ~80 m off the path
     al = SimpleNamespace(utc_s=np.array([10.0, 20.0]))
-    assert np.all(np.isnan(section_distance_mm(al, nav, entry, None)))
+    assert daily_start_miss_m(al, nav, entry) > DAILY_START_WARN_M
 
 
 # ------------------------------------------------- BeforeCollection

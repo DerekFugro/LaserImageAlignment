@@ -43,6 +43,27 @@ TRIGGER_SPACING_TOL_M = 0.05
 MATCH_MAX_SHIFT = 3
 MATCH_MAX_RESIDUAL_M = 0.375
 
+# How photos are paired with the logged triggers (Derek, 2026-10-11).
+#   "head": photo n <-> logged trigger n, counted from the START. No extra
+#           photo is assumed in front; triggers left over at the end (a last
+#           photo lost because the cameras stopped while moving) get no photo.
+#   "tail": the old rule - count back from the END and treat any surplus of
+#           photos as pre-collection photos at the front (Events-output).
+# "head" until more data. On 2026-10-10 the yardstick, seen by both lasers on
+# six runs, put photo 1 on trigger 1 every time; "tail" moved every photo of
+# 093449, 095408 and 095740 one trigger (750 mm) forward, because their missing
+# photo was at the end, not the start. The Oct 8 runs did have an extra front
+# photo (camera log), so this is a setting to revisit, not a law.
+#
+# UPDATE 2026-10-11 (later the same day): the yardstick result above assumed
+# the picture is taken AT the trigger. It is not. Fitting delay and pairing
+# together on all 25 stick passes (5-11 km/h): photo n = trigger n-1 taken
+# 0.32 s later -> 17 mm RMS; photo n = trigger n, no delay -> 156 mm RMS and a
+# miss that grows with speed. A camera with a "trigger delay" section in the
+# lever-arm file is therefore paired photo n = trigger n-1 and placed at
+# trigger time + delay (pipeline.py). A camera without one keeps "head".
+PAIRING_MODE = "head"
+
 
 @dataclass
 class PtpOffsetResult:
@@ -56,6 +77,8 @@ class PtpOffsetResult:
     sweep_r: np.ndarray
     message: str
     n_bad_intervals: int = 0     # profiles dropped for an impossible timestamp
+    # what the correlation fit found; offset_s itself is the fixed TAI-UTC
+    fitted_offset_s: float | None = None
 
 
 def _impossible_intervals(ptp_s, enc, ruler, offset: float):
@@ -89,8 +112,35 @@ def _impossible_intervals(ptp_s, enc, ruler, offset: float):
     return bad_profile
 
 
+# The Gocators are PTP slaves of the SBG, so ptpTimestamp is TAI and
+# UTC = TAI - 37 s EXACTLY. Until 2026-10-08 each run used its own fitted
+# offset instead, and the fit is only good to a few tens of ms: 20261007 fitted
+# 36.966 and 36.984 s (the old cart 36.994-36.996). A time error dt puts every
+# profile speed x dt out - ~80 mm at 2.4 m/s for 34 ms - so the laser moved
+# against the images with SPEED, and differently run to run. Derek: use PTP
+# time, no offsets. The fit is kept only as a check that the PTP lock held.
+PTP_FIT_WARN_S = 0.050
+
+
 def solve_ptp_offset(gocator: GocatorIndex, ruler: "NavTable | DmiTable") -> PtpOffsetResult:
-    """Solve UTC = ptp_us/1e6 - offset by correlating encoder rate vs ruler speed.
+    """UTC = ptp_us/1e6 - 37 s (TAI-UTC, fixed). The correlation fit below
+    still runs, and decides PASS/FAIL - a FAIL means the laser's clock does not
+    behave like a PTP-locked TAI clock - but its number is never used to place
+    anything."""
+    fit = _fit_ptp_offset(gocator, ruler)
+    fit.fitted_offset_s = fit.offset_s
+    dev = fit.offset_s - TAI_UTC_NOMINAL_S
+    fit.offset_s = TAI_UTC_NOMINAL_S
+    note = (f"placed at the fixed TAI-UTC {TAI_UTC_NOMINAL_S:.3f} s; "
+            f"the fit found {fit.fitted_offset_s:.3f} s ({dev * 1000:+.0f} ms)")
+    if fit.passed and abs(dev) > PTP_FIT_WARN_S:
+        note += " - more than 50 ms from TAI-UTC, check the Gocator PTP lock"
+    fit.message = note + "; " + fit.message
+    return fit
+
+
+def _fit_ptp_offset(gocator: GocatorIndex, ruler: "NavTable | DmiTable") -> PtpOffsetResult:
+    """Fit UTC = ptp_us/1e6 - offset by correlating encoder rate vs ruler speed.
 
     `ruler` is anything exposing epoch_s / speed_ms / speed_at(). In production
     that is the corrected Qinertia export (NavTable), NOT the raw DMI wheel —
@@ -203,6 +253,10 @@ class TriggerData:
     spacing_m: np.ndarray          # len n-1
     spacing_ok_frac: float
     message: str
+    # Triggers recovered from Events-output and put IN FRONT of the logged
+    # ones. The ordinal pairing counts from the first LOGGED trigger, so it
+    # needs to know how many sit ahead of it.
+    n_prepended: int = 0
 
 
 def build_triggers(trigger_sbg_us: np.ndarray, utc: UtcTable,
@@ -243,9 +297,18 @@ class MatchResult:
     message: str
 
 
-def match_images_to_triggers(images: ImageSet, triggers: TriggerData) -> MatchResult:
-    """Ordinal (tail-anchored) matching: trigger i <-> image i + k with
-    k = n_images - n_triggers.
+def match_images_to_triggers(images: ImageSet, triggers: TriggerData,
+                             mode: str | None = None,
+                             photo_lag: int = 0) -> MatchResult:
+    """Ordinal matching. mode "head" (the default, see PAIRING_MODE): photo n
+    <-> logged trigger n - photo_lag. mode "tail" (the old rule, described
+    below): trigger i <-> image i + k with k = n_images - n_triggers.
+
+    photo_lag = 1 for a camera with a trigger delay in the lever-arm file
+    (Derek, 2026-10-11): its photo n is the picture taken `delay` after
+    trigger n-1, so photo 1 belongs to the trigger before logging began - the
+    one recovered from Events-output when that file is there, otherwise
+    photo 1 stays unplaced.
 
     WHY ordinal, not distance-fitting: both sequences ARE the same physical
     trigger events in order, but their distances are measured differently.
@@ -312,15 +375,26 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData) -> MatchRe
     # `unexplained` is the run's ORIGINAL images-minus-triggers. When it is
     # negative the first -unexplained triggers never had an image, so the
     # placed ones - and with them the set-aside block - start after those.
-    n_aside = int(getattr(images, "n_set_aside", 0) or 0)
-    first_free = max(0, -unexplained) + n_aside
-    trigger_for_image = np.full(n_img, -1, dtype=np.int64)
-    for i in range(n_trg):
-        j = i + k
-        if i < first_free:
-            continue
-        if 0 <= j < n_img:
-            trigger_for_image[j] = i
+    mode = mode or PAIRING_MODE
+    if mode == "head":
+        # Photo n (its ORIGINAL counter, 750 x n mm - kept through renames by
+        # the manifest, so images already filed into BeforeCollection do not
+        # shift anyone) takes logged trigger n. Leftover triggers at the end
+        # get no photo; a photo beyond the last trigger stays unmatched.
+        ordinal = np.rint(np.asarray(images.counter_mm, dtype=np.float64)
+                          / (TRIGGER_SPACING_M * 1000.0)).astype(np.int64)
+        idx = ordinal - 1 - int(photo_lag) + int(getattr(triggers, "n_prepended", 0) or 0)
+        trigger_for_image = np.where((idx >= 0) & (idx < n_trg), idx, -1).astype(np.int64)
+    else:
+        n_aside = int(getattr(images, "n_set_aside", 0) or 0)
+        first_free = max(0, -unexplained) + n_aside
+        trigger_for_image = np.full(n_img, -1, dtype=np.int64)
+        for i in range(n_trg):
+            j = i + k
+            if i < first_free:
+                continue
+            if 0 <= j < n_img:
+                trigger_for_image[j] = i
     matched_j = np.where(trigger_for_image >= 0)[0]
     n_matched = len(matched_j)
     n_unmatched = n_img - n_matched
@@ -340,9 +414,18 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData) -> MatchRe
         residual_m=residual, scale_a=float(a), median_abs_residual_m=med_abs,
         n_matched=n_matched, n_unmatched=n_unmatched,
         message=(
-            f"ordinal match, shift k = {k:+d} (tail-anchored): {n_matched}/{n_img} images matched"
-            + (f", {n_unmatched} unmatched at the start (pre-collection triggers)" if k > 0 else
-               (f", {abs(k)} trigger(s) before the first image" if k < 0 else ""))
+            ((f"head match (photo n = trigger n-{int(photo_lag)}, camera trigger delay): "
+              if photo_lag else
+              f"head match (photo n = trigger n, no extra front photo assumed): ")
+             + f"{n_matched}/{n_img} images matched"
+             + (f", {n_trg - int(trigger_for_image.max()) - 1} trigger(s) after the last "
+                f"photo got none (cameras stopped while moving?)"
+                if n_matched and int(trigger_for_image.max()) < n_trg - 1 else "")
+             + (f", {n_unmatched} photo(s) beyond the last trigger" if n_unmatched else "")
+             if mode == "head" else
+             f"ordinal match, shift k = {k:+d} (tail-anchored): {n_matched}/{n_img} images matched"
+             + (f", {n_unmatched} unmatched at the start (pre-collection triggers)" if k > 0 else
+                (f", {abs(k)} trigger(s) before the first image" if k < 0 else "")))
             + (f"; counter-vs-DMI scale a = {a:.5f}, median |residual| = {med_abs * 1000:.0f} mm"
                if np.isfinite(a) else "")
         ),
@@ -406,7 +489,8 @@ def offset_by_lever_arm(lat_deg, lon_deg, alt_m, heading_deg,
 def align_images(images: ImageSet, triggers: TriggerData, match: MatchResult,
                  ptp: PtpOffsetResult, nav: NavTable | None,
                  arm_m: float | None = None,
-                 arm_xyz: tuple | None = None) -> ImageAlignment:
+                 arm_xyz: tuple | None = None,
+                 delay_s: float = 0.0) -> ImageAlignment:
     """Position every image.
 
     ``arm_m`` is how far BEHIND the laser this camera's lens sits
@@ -432,8 +516,13 @@ def align_images(images: ImageSet, triggers: TriggerData, match: MatchResult,
     for j in range(n):
         i = int(match.trigger_for_image[j])
         if i >= 0:
-            utc_s[j] = triggers.utc_s[i]
+            # The picture is taken `delay_s` after its trigger pulse (lever-arm
+            # file, per camera). Time first, then position from that time.
+            utc_s[j] = triggers.utc_s[i] + float(delay_s or 0.0)
             dist[j] = triggers.dist_m[i]
+    if delay_s and nav is not None:
+        ok = np.isfinite(utc_s)
+        dist[ok] = nav.dist_at(utc_s[ok])
     ptp_us = np.where(np.isnan(utc_s), -1, ((utc_s + ptp.offset_s) * 1e6)).astype(np.int64)
     if nav is not None:
         loc = nav.locate(utc_s)
@@ -481,6 +570,43 @@ def align_images(images: ImageSet, triggers: TriggerData, match: MatchResult,
         arm_m=arm_m if arm_m is not None else (
             -float(arm_xyz[0]) if arm_xyz is not None else None),
     )
+
+
+def scan_ground_positions(gocator: GocatorIndex, ptp: PtpOffsetResult,
+                          nav: NavTable, arm_xyz) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(lat, lon, alt) of every Gocator profile: its own PTP time on the
+    trajectory, moved out to the sensor by the rigid lever arm.
+
+    The ONE place this is worked out - the written Gocator GPS columns and the
+    viewer's placement of scans on a photo both call it, so the two can never
+    disagree about where a scan is.
+    """
+    utc = gocator.ptp_us.astype(np.float64) / 1e6 - ptp.offset_s
+    loc = nav.locate(utc)
+    x, y, z = (float(v) for v in arm_xyz)
+    return offset_by_lever_arm(loc["lat_deg"], loc["lon_deg"], loc["alt_m"],
+                               nav.heading_at(utc), x_m=x, y_m=y, z_m=z)
+
+
+def along_across_m(lat0_deg: float, lon0_deg: float, heading_deg: float,
+                   lat_deg, lon_deg) -> tuple[np.ndarray, np.ndarray]:
+    """Where points sit relative to one point and heading, in metres:
+    `along` forward (direction of travel), `across` to the right.
+
+    Position minus position, projected on the heading - NOT a difference of
+    travelled distance. The travelled-distance ruler adds up GPS creep while the
+    van stands still (about 1 m at the start of 20261008.102604), and anything
+    that subtracts two readings of it inherits that error; a straight-line
+    offset between two positions does not. Flat-earth over a few metres is
+    exact to well under a millimetre.
+    """
+    h = np.radians(float(heading_deg))
+    m_lon = EARTH_M_PER_DEG_LAT * np.cos(np.radians(float(lat0_deg)))
+    d_north = (np.asarray(lat_deg, dtype=np.float64) - float(lat0_deg)) * EARTH_M_PER_DEG_LAT
+    d_east = (np.asarray(lon_deg, dtype=np.float64) - float(lon0_deg)) * m_lon
+    along = d_north * np.cos(h) + d_east * np.sin(h)
+    across = -d_north * np.sin(h) + d_east * np.cos(h)
+    return along, across
 
 
 def gocator_distances(gocator: GocatorIndex, ptp: PtpOffsetResult,

@@ -181,6 +181,7 @@ def _check(res, check_id):
     return hit
 
 
+@pytest.mark.usefixtures("tail_pairing")
 class TestRunRecoversItsFirstImage:
     def test_without_the_file_the_first_image_is_unplaced(self, synth_run_root,
                                                           synth_cal_dir):
@@ -261,6 +262,7 @@ def test_batch_sets_aside_the_before_section_images(synth_run_root, synth,
     assert not list(rear.glob("-*.jpg")), "none may remain in the camera folder"
 
 
+@pytest.mark.usefixtures("tail_pairing")
 def test_a_rerun_after_set_aside_still_matches_every_image(synth_run_root, synth,
                                                            synth_cal_dir, tmp_path):
     """Regression: filing the before-section images away leaves the camera

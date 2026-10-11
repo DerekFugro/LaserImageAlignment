@@ -69,12 +69,23 @@ class TestSyntheticEndToEnd:
         assert result.ptp_l.r > 0.99
 
     def test_match_is_ordinal_tail_anchored(self, result):
-        m = result.match
+        from core.alignment import match_images_to_triggers
+        m = match_images_to_triggers(result.parsed.images, result.triggers, mode="tail")
         assert m.shift_k == 1  # one extra image at the start
         assert m.n_unmatched == 1
         assert int(m.trigger_for_image[0]) == -1        # pre-collection image
         assert int(m.trigger_for_image[1]) == 0
         assert int(m.trigger_for_image[-1]) == len(result.triggers.utc_s) - 1
+
+    def test_match_head_anchored_is_the_default(self, result):
+        """PAIRING_MODE "head" (Derek, 2026-10-11): photo n takes logged
+        trigger n; a photo beyond the last trigger stays unmatched."""
+        m = result.match
+        n_trg = len(result.triggers.utc_s)
+        assert int(m.trigger_for_image[0]) == 0
+        assert int(m.trigger_for_image[1]) == 1
+        assert int(m.trigger_for_image[n_trg - 1]) == n_trg - 1
+        assert all(int(t) == -1 for t in m.trigger_for_image[n_trg:])
 
     def test_counter_scale_limit_covers_the_fleet_and_still_has_teeth(self, result):
         """align.counter_scale is realtime INS cadence vs postprocessed INS

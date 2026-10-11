@@ -374,8 +374,21 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
         except ParseError as exc:
             report.add(f"format.camera.{cam_name}", f"Camera '{cam_name}' scan",
                        Severity.FAIL, str(exc))
-    pr.triggers_sbg_us = attempt("format.event_a", "eventOutA.txt", disc.KEY_EVENT_A, parse_event_triggers)
+    trig = attempt("format.event_a", "eventOutA.txt", disc.KEY_EVENT_A,
+                   lambda p: parse_event_triggers(p, with_wraps=True))
+    pr.triggers_sbg_us, trig_wraps = trig if trig is not None else (None, 0)
     pr.utc = attempt("format.utc_time", "utcTime.txt", disc.KEY_UTC_TIME, UtcTable.parse)
+    if pr.triggers_sbg_us is not None and pr.utc is not None:
+        # each file was unwrapped from its own first row; put the triggers on
+        # the clock table's count of roll-overs before anything joins them
+        pr.triggers_sbg_us = np.round(pr.utc.align_wraps(pr.triggers_sbg_us)).astype(np.int64)
+    n_wraps = max(trig_wraps, pr.utc.n_wraps if pr.utc is not None else 0)
+    if n_wraps:
+        report.add(
+            "format.sbg_clock_wrap", "SBG clock roll-over", Severity.INFO,
+            f"the SBG's 32-bit microsecond clock rolled over {n_wraps} time(s) during "
+            f"this run (it does so every 71.6 min it is powered) - corrected; trigger "
+            f"times are continuous", n_wraps=n_wraps)
     pr.dmi = attempt("format.dmi", "DmiStationEx CSV", disc.KEY_DMI, DmiTable.parse)
     # A laser file that will not parse holds back THAT laser only. Images are
     # placed by trigger time and need neither laser's profiles; until
@@ -1037,6 +1050,7 @@ def check_content(pr: ParsedRun, report: QCReport,
                 # only this sensor's own GPS columns depend on this solve
                 blocks=(f"gocator_{side}",),
                 offset_s=ptp.offset_s, r=ptp.r,
+                fitted_offset_s=getattr(ptp, "fitted_offset_s", None),
             )
             if pr.nav is not None and ptp.passed and triggers is not None and len(triggers.dist_m):
                 # Measured in METRES of section missing, not as a percentage

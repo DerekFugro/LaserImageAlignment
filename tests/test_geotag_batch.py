@@ -519,6 +519,7 @@ class TestIssueLog:
             workdir / PROCESSED_DIR / ALIGNMENT_DIR / "run_mapping.csv")
         assert not (workdir / PROCESSED_DIR / "run_mapping.csv").exists()
 
+    @pytest.mark.usefixtures("tail_pairing")
     def test_every_warning_and_failure_is_a_row(self, workdir, synth_cal_dir,
                                                 tmp_path):
         import csv as _csv

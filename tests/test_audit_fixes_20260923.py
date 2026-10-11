@@ -217,6 +217,7 @@ def _trigs(n):
                        message="")
 
 
+@pytest.mark.usefixtures("tail_pairing")
 def test_rerun_does_not_give_the_unplaced_first_photo_a_trigger():
     """20260816_RevRunsBar: 42 photos, 41 triggers, no Events-output.txt.
     Pass 1: photo 0 unplaced, photos 1-2 set aside, photos 3..41 placed on

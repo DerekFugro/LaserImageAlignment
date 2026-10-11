@@ -8,8 +8,9 @@ Old: the camera's realtime odometer — millimetres since the system armed.
      Its zero is wherever the cart woke up, and it drifts 0.3-0.7% against
      the corrected trajectory.
 New: millimetres from the SECTION START, measured on the corrected (PPK)
-     trajectory, with the section start taken from the ACS Daily file
-     (core.daily). Same units, same width, same look — a real location.
+     trajectory, with the section start taken as where the SESSION started
+     (its first logged trigger). Same units, same width, same look — a real
+     location.
 
 Because the two look identical, the manifest is not a convenience, it is
 load-bearing. Every rename is written FIRST to a rename_manifest.csv beside
@@ -40,23 +41,18 @@ DEFAULT_DIGITS = 12
 # So every move goes via a temporary name: nothing is ever written over.
 TEMP_SUFFIX = ".__renaming__"
 
-# The section-start anchor is searched over this run's own triggers, padded
-# FORWARD only. Runs sit ~60 s apart, so the pad must stay well under that or
-# the search can reach into a neighbouring run's pass.
+# Where 0 m is: the van's position at the SESSION'S first logged trigger
+# (Derek, 2026-10-09). ACS starts collecting at the section start, so the
+# session start IS the section start; one photo, maybe two, then falls before
+# it and goes to BeforeCollection.
 #
-# Nothing pads BACKWARDS. ACS starts collecting at the section start, so a
-# real closest approach is never seconds before the first trigger — but the
-# minutes before a run are where the PPK solution is still settling, and it
-# accumulates metres of position noise while the cart stands still (up to
-# 8.05 m on 20260824). A 15 s backward pad reached straight into it, and two
-# runs of that collection did anchor there. Clamping costs nothing measurable
-# — the closest approach moved 272 mm and 487 mm, and the miss distance was
-# unchanged at 1.17 m and 1.37 m — and it removes the chance of anchoring on
-# a position the solution had not converged on.
-ANCHOR_PAD_S = 15.0
-# Real closest approaches on 20260824 were 0.01-0.72 m. Anything past this and
-# the Daily row is not describing this run: refuse rather than name it wrong.
-MAX_ANCHOR_MISS_M = 5.0
+# Until 2026-10-09 the anchor was the trajectory point nearest the Daily file's
+# LatBeg/LongBeg. On the new van that point was 30.7 m and 35.5 m away from
+# where sessions .101916 and .102211 really started (ACS logs it with
+# GPS Mode = NoSolution), and on the looping .111537 the nearest approach was a
+# LATER pass 493 m in - 42, 70 and 657 real photos set aside. The Daily point
+# is now only a check, reported when it is further than this from the start.
+DAILY_START_WARN_M = 5.0
 
 # Images whose footprint lies BEFORE the section start are real photographs of
 # real ground, but they are not part of the section. They are set aside here so
@@ -81,62 +77,61 @@ def station_name(distance_mm: float, digits: int = DEFAULT_DIGITS) -> str | None
     return f"{sign}{abs(mm):0{digits}d}.jpg"
 
 
-def section_distance_mm(al, nav, entry: DailyEntry, arm_m: float | None):
-    """Distance (mm) from the section start to each image, NaN where unplaced.
+def session_start_utc(al, start_utc_s: float | None = None) -> float:
+    """UTC of the session start: `start_utc_s` when the caller knows the first
+    LOGGED trigger, else the first trigger (or image) time there is.
 
-    Measured along the corrected trajectory, from the nav point nearest the
-    Daily file's section-start coordinate to the image's footprint. Always
-    counts UP with travel, whichever way the LRS chainage runs — the number
-    is "how far into the section this picture is", which is what the old
-    filename meant too.
-
-    Picking the anchor is the delicate part, and the trap is not the one it
-    looks like. The nav export covers the whole session, and the cart drives
-    the same ground on every run, so a session-wide nearest-point search can
-    anchor on a DIFFERENT run's pass — measured at 570 m out. But hunting for
-    "local minima of the miss distance" is worse: while the cart sits parked
-    at the session start, GPS jitter makes every other sample a local minimum,
-    and on 20260824 the parking spot happened to sit 11-20 m from a section
-    start. That produced ~11,000 candidates per run, and which one won shifted
-    with the run's first image time — every filename in the run moved 390 mm
-    when one image was added at the front.
-
-    What is actually true: ACS starts collecting at the section start, so the
-    closest approach lies inside this run's own stretch. Search only that and
-    take the single global minimum. It is unique and on 20260824 it lands
-    0.01-0.72 m from the Daily coordinate. Anything worse than
-    MAX_ANCHOR_MISS_M means the Daily row does not describe this run, and
-    everything is returned unplaced (NaN) rather than wrong.
-
-    The window comes from the run's TRIGGERS, not from the images on disk.
-    That matters: images before the section start are moved out to
-    BeforeCollection afterwards, and a window built from the surviving images
-    would then start later, move the anchor, shift every distance, and push
-    yet more images out on the next run — a ratchet that moved 3 more images
-    on the second pass over 20260824. Triggers do not change when files do.
+    Callers should pass the first logged eventOutA trigger. A trigger recovered
+    from the events file is placed BEFORE it; anchoring on that would move every
+    name 0.75 m the day an events file appears. The logged one never moves -
+    and it never changes when images are set aside, which is what stopped the
+    old rename ratchet.
     """
+    if start_utc_s is not None and np.isfinite(start_utc_s):
+        return float(start_utc_s)
     span = getattr(getattr(al, "triggers", None), "utc_s", None)
     if span is None or not np.any(np.isfinite(span)):
         span = al.utc_s
-    finite_t = np.asarray(span, dtype=float)
-    finite_t = finite_t[np.isfinite(finite_t)]
-    if finite_t.size == 0:
-        return np.full(len(np.atleast_1d(al.utc_s)), np.nan)
-    d_lat = (nav.lat_deg - entry.lat_beg) * 111320.0
-    d_lon = (nav.lon_deg - entry.lon_beg) * 111320.0 * np.cos(np.radians(entry.lat_beg))
-    miss_m = np.hypot(d_lat, d_lon)
-    in_run = ((nav.epoch_s >= finite_t.min())          # never before the run
-              & (nav.epoch_s <= finite_t.max() + ANCHOR_PAD_S))
-    if not np.any(in_run):
-        return np.full(len(np.atleast_1d(al.utc_s)), np.nan)
-    k = int(np.argmin(np.where(in_run, miss_m, np.inf)))
-    if miss_m[k] > MAX_ANCHOR_MISS_M:
-        return np.full(len(np.atleast_1d(al.utc_s)), np.nan)
-    s_start = float(nav.along_m[k])
+    t = np.asarray(span, dtype=float)
+    t = t[np.isfinite(t)]
+    return float(t.min()) if t.size else float("nan")
+
+
+def section_distance_mm(al, nav, entry: DailyEntry, arm_m: float | None,
+                        start_utc_s: float | None = None):
+    """Distance (mm) from the session start to each image's footprint, NaN
+    where unplaced.
+
+    0 m is the van's position at the session start (see session_start_utc).
+    Measured along the corrected trajectory, so it always counts UP with
+    travel, whichever way the LRS chainage runs. `entry` (the Daily row) is
+    not used for the anchor any more - see daily_start_miss_m for the check.
+    """
+    n = len(np.atleast_1d(al.utc_s))
+    t0 = session_start_utc(al, start_utc_s)
+    if not np.isfinite(t0):
+        return np.full(n, np.nan)
+    s_start = float(np.asarray(nav.dist_at(np.array([t0])), dtype=float)[0])
+    if not np.isfinite(s_start):
+        return np.full(n, np.nan)
     s_img = nav.dist_at(al.utc_s) - (float(arm_m) if arm_m else 0.0)
-    out = (s_img - s_start) * 1000.0
-    out[~np.isfinite(al.utc_s)] = np.nan
+    out = (np.asarray(s_img, dtype=float) - s_start) * 1000.0
+    out[~np.isfinite(np.asarray(al.utc_s, dtype=float))] = np.nan
     return out
+
+
+def daily_start_miss_m(al, nav, entry: DailyEntry,
+                       start_utc_s: float | None = None) -> float:
+    """Metres from the Daily file's LatBeg/LongBeg to where the van really was
+    at the session start. A check on the Daily row, nothing more."""
+    t0 = session_start_utc(al, start_utc_s)
+    if not np.isfinite(t0):
+        return float("nan")
+    lat = float(np.interp(t0, nav.epoch_s, nav.lat_deg))
+    lon = float(np.interp(t0, nav.epoch_s, nav.lon_deg))
+    d_lat = (lat - entry.lat_beg) * 111320.0
+    d_lon = (lon - entry.lon_beg) * 111320.0 * np.cos(np.radians(entry.lat_beg))
+    return float(np.hypot(d_lat, d_lon))
 
 
 def recover_interrupted(folder: Path) -> tuple[list, list]:

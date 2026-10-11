@@ -148,6 +148,22 @@ _AXIS_RE = re.compile(r"^\s*([XYZ])\s+([-+]?[0-9]*\.?[0-9]+)(?![0-9.])", re.IGNO
 _BARE_NUMBER_RE = re.compile(r"^\s*([-+]?[0-9]*\.?[0-9]+)\s*$")
 # not a camera name, so it can never collide with one
 _LENS_KEY = "#lens_height"
+# "## Rear camera trigger delay" + a bare number in SECONDS -> "#delay:Rear".
+# How long after its SBG trigger pulse a camera actually takes the picture
+# (Derek, 2026-10-11). Measured 0.32 s for Rear on the 2026-10-10 yardstick
+# runs: with it, and photo n paired with trigger n-1, all 25 stick passes
+# from 5 to 11 km/h sat within 17 mm RMS of both lasers.
+_DELAY_PREFIX = "#delay:"
+
+
+def trigger_delay_s(arms: dict | None, camera_name: str | None) -> float | None:
+    """Seconds from trigger pulse to picture for this camera, or None when the
+    lever-arm file does not state one (the camera is then paired the old way:
+    photo n = trigger n, no delay)."""
+    if not arms or not camera_name:
+        return None
+    v = arms.get(_DELAY_PREFIX + camera_name)
+    return float(v[0]) if v else None
 
 
 def _lens_heading(low: str) -> bool:
@@ -207,6 +223,8 @@ def parse_lever_arms_checked(
             low = head.lower()
             if low.startswith("gocator"):
                 name = "L" if "left" in low else "R" if "right" in low else ""
+            elif "delay" in low:
+                name = _DELAY_PREFIX + head.split()[0]
             elif low.endswith("camera"):
                 name = head.split()[0]
             elif _lens_heading(low):
@@ -214,7 +232,7 @@ def parse_lever_arms_checked(
             else:
                 name = ""
             continue
-        if name == _LENS_KEY:
+        if name == _LENS_KEY or name.startswith(_DELAY_PREFIX):
             m = _BARE_NUMBER_RE.match(line)
             if m:
                 axes["X"] = m.group(1)
@@ -533,7 +551,8 @@ EXCLUDED_CALIBRATION_MARKERS = ("refined",)
 
 
 def find_pave_calibration(calibrations_dir: Path) -> Path | None:
-    """Newest PAVE_*.yaml under the calibrations folder (recursive).
+    """Newest PAVE_*.yaml under the calibrations folder (recursive) that loads
+    as a lens calibration; files without lens data are passed over.
 
     *Refined* files are IGNORED (Derek, 2026-08-19): they are produced by a
     separate bar-run tool, have been observed with a 6x-wrong focal length and
@@ -545,6 +564,20 @@ def find_pave_calibration(calibrations_dir: Path) -> Path | None:
     candidates = [p for p in calibrations_dir.rglob("PAVE_*.yaml")
                   if not any(m in p.name.lower() for m in EXCLUDED_CALIBRATION_MARKERS)]
     candidates.sort(key=lambda p: p.stat().st_mtime)
+    # Chosen by CONTENT, not just by name (Derek, 2026-10-10). A camera
+    # MOUNTING file was saved as PAVE_262503744_extrinsic.yaml; it matched the
+    # name, was the newest, and has no lens data, so every run after
+    # 2026-10-09 13:28 lost its lens calibration and the viewer drew no scan
+    # lines. The newest file that really loads as a lens calibration wins.
+    for p in reversed(candidates):
+        try:
+            CameraCalibration.load(p)
+        except ParseError:
+            continue
+        return p
+    # None of them loads: hand back the newest anyway, so the loader's error
+    # (naming the file and the missing field) reaches the QC report instead of
+    # a bare "no calibration found".
     return candidates[-1] if candidates else None
 
 

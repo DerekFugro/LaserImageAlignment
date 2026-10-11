@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import calibration as cal
 from . import discovery as disc
 from .atomic import atomic_open
 from .alignment import (
@@ -77,14 +78,17 @@ def process_run(run: disc.RunPaths) -> RunResult:
     # never used for placement or solving — cross-check only (see qc.py).
     ruler = parsed.nav
     if parsed.triggers_sbg_us is not None and parsed.utc is not None and ruler is not None:
-        trig_us = _recover_pre_collection_triggers(parsed, report)
+        trig_us, n_pre = _recover_pre_collection_triggers(parsed, report)
         result.triggers = build_triggers(trig_us, parsed.utc, ruler)
+        result.triggers.n_prepended = n_pre
     if parsed.gocator_l is not None and ruler is not None:
         result.ptp_l = solve_ptp_offset(parsed.gocator_l, ruler)
     if parsed.gocator_r is not None and ruler is not None:
         result.ptp_r = solve_ptp_offset(parsed.gocator_r, ruler)
     if parsed.images is not None and result.triggers is not None:
-        result.match = match_images_to_triggers(parsed.images, result.triggers)
+        result.match = match_images_to_triggers(
+            parsed.images, result.triggers,
+            photo_lag=_photo_lag(parsed, _camera_name_of(parsed, parsed.images)))
         report.add(
             "align.match", "Image-trigger match",
             Severity.PASS if result.match.n_matched else Severity.FAIL,
@@ -123,7 +127,9 @@ def process_run(run: disc.RunPaths) -> RunResult:
     # matched independently so a camera with a different image count is safe)
     if result.triggers is not None and ptp is not None and parsed.cameras:
         for cam_name, cam_images in parsed.cameras.items():
-            cam_match = match_images_to_triggers(cam_images, result.triggers)
+            delay = cal.trigger_delay_s(parsed.lever_arms, cam_name)
+            cam_match = match_images_to_triggers(
+                cam_images, result.triggers, photo_lag=_photo_lag(parsed, cam_name))
             result.camera_matches[cam_name] = cam_match
             # The whole (X, Y, Z) from the lever-arm file - the one parsed
             # for THIS run (parsed.lever_arms, from run.paths), not a
@@ -133,7 +139,15 @@ def process_run(run: disc.RunPaths) -> RunResult:
             arm = None if arm_xyz is None else -float(arm_xyz[0])
             result.camera_alignments[cam_name] = align_images(
                 cam_images, result.triggers, cam_match, ptp, parsed.nav,
-                arm_xyz=arm_xyz)
+                arm_xyz=arm_xyz, delay_s=delay or 0.0)
+            report.add(
+                f"align.camera.{cam_name}.delay", f"Camera '{cam_name}' trigger delay",
+                Severity.PASS,
+                (f"picture taken {delay * 1000:.0f} ms after its trigger; photo n "
+                 f"paired with trigger n-1 (lever-arm file)" if delay is not None else
+                 "no trigger delay in the lever-arm file - photo n paired with "
+                 "trigger n, placed at the trigger time (not verified for this camera)"),
+                delay_s=delay)
             report.add(
                 f"align.camera.{cam_name}", f"Camera '{cam_name}' match",
                 Severity.PASS if cam_match.n_matched else Severity.FAIL,
@@ -185,7 +199,21 @@ def process_run(run: disc.RunPaths) -> RunResult:
     return result
 
 
-def _recover_pre_collection_triggers(parsed, report) -> np.ndarray:
+def _camera_name_of(parsed, imageset) -> str | None:
+    """The camera folder name an ImageSet came from (identity), or None."""
+    for name, im in (parsed.cameras or {}).items():
+        if im is imageset:
+            return name
+    return None
+
+
+def _photo_lag(parsed, cam_name) -> int:
+    """1 when the lever-arm file gives this camera a trigger delay (its photo
+    n is the picture taken after trigger n-1), else 0."""
+    return 1 if cal.trigger_delay_s(parsed.lever_arms, cam_name) is not None else 0
+
+
+def _recover_pre_collection_triggers(parsed, report) -> tuple[np.ndarray, int]:
     """Put back the triggers that fired before ACS started logging.
 
     The SBG fires the camera every 0.750 m whether ACS is collecting or not,
@@ -193,9 +221,10 @@ def _recover_pre_collection_triggers(parsed, report) -> np.ndarray:
     eventOutA.txt starts one trigger late and the run's first image can never
     be placed from it. Qinertia's whole-session event export has those rows.
 
-    Returns the trigger list to use. Unchanged whenever the events file is
-    absent, does not line up, or the run is not short of triggers — and the QC
-    report always says which of those happened.
+    Returns (the trigger list to use, how many were put in front of the logged
+    ones). Unchanged whenever the events file is absent, does not line up, or
+    the run is not short of triggers — and the QC report always says which of
+    those happened.
     """
     from .events import leading_trigger_utc_s, utc_to_sbg_us
 
@@ -211,12 +240,44 @@ def _recover_pre_collection_triggers(parsed, report) -> np.ndarray:
         return len(imageset) + imageset.n_set_aside
 
     logged = np.asarray(parsed.triggers_sbg_us, dtype=np.int64)
+    from .alignment import PAIRING_MODE
+    if PAIRING_MODE == "head":
+        # A camera with a trigger delay pairs photo n with trigger n-1, so its
+        # photo 1 belongs to the trigger just BEFORE logging began. Recover
+        # that one from Events-output; with no delay camera nothing is needed.
+        lagged = [c for c in (parsed.cameras or {})
+                  if cal.trigger_delay_s(parsed.lever_arms, c) is not None]
+        if not lagged:
+            report.add("align.pre_collection_triggers", "Pre-collection triggers",
+                       Severity.PASS,
+                       "not used - pairing counts from the first logged trigger "
+                       "(no extra front photo assumed)", n_recovered=0)
+            return logged, 0
+        if parsed.events is None or parsed.utc is None:
+            report.add("align.pre_collection_triggers", "Pre-collection triggers",
+                       Severity.WARN,
+                       "photo 1 belongs to the trigger before logging began "
+                       f"({', '.join(lagged)} trigger delay); add Qinertia's "
+                       "Events-output.txt to place it - without it photo 1 stays "
+                       "unplaced", n_missing=1)
+            return logged, 0
+        extra_utc, note = leading_trigger_utc_s(
+            parsed.events, parsed.utc.sbg_to_utc(logged), 1)
+        if len(extra_utc) == 0:
+            report.add("align.pre_collection_triggers", "Pre-collection triggers",
+                       Severity.WARN, note + " - photo 1 stays unplaced", n_missing=1)
+            return logged, 0
+        extra_us = utc_to_sbg_us(parsed.utc, extra_utc).astype(np.int64)
+        report.add("align.pre_collection_triggers", "Pre-collection triggers",
+                   Severity.PASS, note + " (photo 1, camera trigger delay)",
+                   n_recovered=int(len(extra_us)))
+        return np.concatenate([extra_us, logged]), int(len(extra_us))
     counts = [full_count(im) for im in (parsed.cameras or {}).values()]
     if parsed.images is not None:
         counts.append(full_count(parsed.images))
     n_missing = (max(counts) - len(logged)) if counts else 0
     if n_missing <= 0:
-        return logged
+        return logged, 0
     if parsed.events is None:
         report.add(
             "align.pre_collection_triggers", "Pre-collection triggers", Severity.WARN,
@@ -224,17 +285,17 @@ def _recover_pre_collection_triggers(parsed, report) -> np.ndarray:
             "before ACS started. Add Qinertia's Events-output.txt to the export "
             "folder to place them; without it they stay unplaced",
             n_missing=n_missing)
-        return logged
+        return logged, 0
     logged_utc = parsed.utc.sbg_to_utc(logged)
     extra_utc, note = leading_trigger_utc_s(parsed.events, logged_utc, n_missing)
     if len(extra_utc) == 0:
         report.add("align.pre_collection_triggers", "Pre-collection triggers",
                    Severity.WARN, note, n_missing=n_missing)
-        return logged
+        return logged, 0
     extra_us = utc_to_sbg_us(parsed.utc, extra_utc).astype(np.int64)
     report.add("align.pre_collection_triggers", "Pre-collection triggers",
                Severity.PASS, note, n_recovered=int(len(extra_us)))
-    return np.concatenate([extra_us, logged])
+    return np.concatenate([extra_us, logged]), int(len(extra_us))
 
 
 EXPORT_COLUMNS = [

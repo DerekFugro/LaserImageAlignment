@@ -193,3 +193,13 @@ def sample_root():
 @pytest.fixture(scope="session")
 def sample_cal_dir():
     return CAL_DIR
+
+
+@pytest.fixture
+def tail_pairing(monkeypatch):
+    """Run a test under the OLD pairing rule (count back from the end, extra
+    photos are pre-collection photos at the front). The default became "head"
+    on 2026-10-11; these tests pin the tail rule's behaviour so it still works
+    when PAIRING_MODE is switched back."""
+    import core.alignment as al
+    monkeypatch.setattr(al, "PAIRING_MODE", "tail")

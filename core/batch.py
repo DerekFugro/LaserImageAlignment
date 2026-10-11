@@ -17,7 +17,7 @@ import numpy as np
 from . import calibration as cal
 from . import discovery as disc
 from .atomic import atomic_open, atomic_write_text
-from .alignment import PTP_PASS_MAX_DEV_S, offset_by_lever_arm
+from .alignment import PTP_PASS_MAX_DEV_S, scan_ground_positions
 from .formats import GOCATOR_META_COLS, TAI_UTC_NOMINAL_S
 from .geotag import ensure_piexif, geotag_image, inject_gocator_gps
 from .pipeline import RunResult, export_csv, process_run
@@ -472,7 +472,9 @@ class BatchReport:
             if o.result is not None and o.result.ptp_l is not None:
                 p = o.result.ptp_l
                 m = o.result.match
-                lines.append(f"         PTP offset {p.offset_s:.3f} s (r={p.r:.3f})"
+                lines.append(f"         PTP offset {p.offset_s:.3f} s fixed"
+                         + (f", fit {p.fitted_offset_s:.3f}" if getattr(p, "fitted_offset_s", None) is not None else "")
+                         + f" (r={p.r:.3f})"
                              + (f" | match k={m.shift_k:+d}, {m.n_matched}/"
                                 f"{len(o.result.parsed.images or [])} images" if m else ""))
             for f in _collapse(o.failures):
@@ -1018,7 +1020,8 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
     names it has and says so in its notes.
     """
     from .daily import find_daily_file, parse_daily
-    from .rename import (move_before_collection, rename_camera_folder,
+    from .rename import (DAILY_START_WARN_M, daily_start_miss_m,
+                         move_before_collection, rename_camera_folder,
                          section_distance_mm)
 
     # THE SAME DAY the runs were picked from. A glob here would measure day
@@ -1049,6 +1052,20 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
             continue
         nav = res.parsed.nav
         arms = res.parsed.lever_arms or {}
+        # 0 m = where the SESSION started: its first LOGGED trigger (a trigger
+        # recovered from the events file sits before it and must not move it)
+        start_utc = None
+        logged, clock = res.parsed.triggers_sbg_us, res.parsed.utc
+        if logged is not None and len(logged) and clock is not None:
+            start_utc = float(clock.sbg_to_utc(np.asarray(logged[:1]))[0])
+        if res.camera_alignments:
+            any_al = next(iter(res.camera_alignments.values()))
+            miss = daily_start_miss_m(any_al, nav, entry, start_utc)
+            if np.isfinite(miss) and miss > DAILY_START_WARN_M:
+                o.warnings.append(
+                    f"daily start: the ACS Daily start point is {miss:.1f} m from where "
+                    f"this session started - names count from the session start, so "
+                    f"check this is the right Daily row")
         for cam_name, al in sorted(res.camera_alignments.items()):
             # The arm from the RUN'S lever-arm file - the same numbers the
             # EXIF was just written from (parsed once, in parse_all). Until
@@ -1057,7 +1074,8 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
             # moved every stamped position but not one filename.
             arm_xyz = arms.get(cam_name)
             mm = section_distance_mm(
-                al, nav, entry, None if arm_xyz is None else -float(arm_xyz[0]))
+                al, nav, entry, None if arm_xyz is None else -float(arm_xyz[0]),
+                start_utc_s=start_utc)
             r = rename_camera_folder(Path(al.images.dir), al.images.files,
                                      mm, entry, o.run_id, cam_name)
             o.renames[cam_name] = r
@@ -1198,8 +1216,6 @@ def _process_one(run: disc.RunPaths, write_images: bool, write_gocator: bool,
                 out.held[target] = why(target) if target in blocked else \
                     f"Gocator {side} PTP offset did not solve"
                 continue
-            utc = goc.ptp_us.astype(np.float64) / 1e6 - ptp.offset_s
-            loc = nav.locate(utc)
             # Out to where the sensor actually is. The lasers straddle the
             # cart 0.715 m apart; without this both were stamped at the IMU,
             # so the two wheelpaths landed on top of each other. The arm is
@@ -1209,9 +1225,8 @@ def _process_one(run: disc.RunPaths, write_images: bool, write_gocator: bool,
             if arm is None:
                 out.held[target] = f"Gocator {side} has no lever arm in the file"
                 continue
-            lat, lon, alt = offset_by_lever_arm(
-                loc["lat_deg"], loc["lon_deg"], loc["alt_m"],
-                nav.heading_at(utc), *arm)
+            # the same function the viewer uses to put scans on a photo
+            lat, lon, alt = scan_ground_positions(goc, ptp, nav, arm)
             try:
                 n = inject_gocator_gps(
                     Path(goc.path), lat, lon, alt,

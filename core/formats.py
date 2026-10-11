@@ -101,23 +101,48 @@ def _read_sbg_table(path: Path, expected_first_col: str = "timestamp") -> tuple[
     return [n.strip() for n in names], np.asarray(rows, dtype=np.float64)
 
 
-def parse_event_triggers(path: Path) -> np.ndarray:
-    """eventOutA.txt -> strictly increasing SBG timestamps in microseconds (int64)."""
+# The SBG's internal clock (the first column of every DataLogger .txt) is a
+# 32-bit microsecond counter from power-on: it rolls over to 0 every 2**32 us
+# (71.58 min). A run that spans that moment logs a ~4295 s backward jump. That
+# is normal, not a fault - it is undone here so the clock keeps counting up.
+SBG_CLOCK_WRAP_US = 2 ** 32
+
+
+def unwrap_sbg_us(ts) -> tuple[np.ndarray, int]:
+    """Undo the SBG clock roll-over in file order. Returns (int64 ts, n_wraps).
+
+    Only a drop of more than half the wrap counts as a roll-over; any smaller
+    backward step is left alone so the callers still reject it as bad data.
+    """
+    ts = np.asarray(ts, dtype=np.int64)
+    if len(ts) < 2:
+        return ts, 0
+    wraps = np.concatenate(([0], np.cumsum(np.diff(ts) < -SBG_CLOCK_WRAP_US // 2)))
+    return ts + wraps.astype(np.int64) * SBG_CLOCK_WRAP_US, int(wraps[-1])
+
+
+def parse_event_triggers(path: Path, with_wraps: bool = False):
+    """eventOutA.txt -> strictly increasing SBG timestamps in microseconds (int64).
+
+    The clock roll-over is undone (see SBG_CLOCK_WRAP_US). with_wraps=True
+    returns (ts, n_wraps) so a report can say a roll-over was corrected.
+    """
     names, data = _read_sbg_table(path)
-    ts = data[:, 0].astype(np.int64)
+    ts, n_wraps = unwrap_sbg_us(data[:, 0].astype(np.int64))
     if len(ts) >= 2 and not np.all(np.diff(ts) > 0):
         bad = int(np.argmin(np.diff(ts) > 0)) + 1
         raise ParseError(path, f"trigger timestamps not strictly increasing near data row {bad}")
-    return ts
+    return (ts, n_wraps) if with_wraps else ts
 
 
 @dataclass
 class UtcTable:
     """SBG internal clock (us) <-> UTC epoch seconds, from utcTime.txt."""
 
-    sbg_us: np.ndarray  # int64, strictly increasing
+    sbg_us: np.ndarray  # int64, strictly increasing (clock roll-over undone)
     epoch_s: np.ndarray  # float64 UTC unix seconds
     path: str = ""
+    n_wraps: int = 0     # SBG clock roll-overs undone while reading the file
 
     @classmethod
     def parse(cls, path: Path) -> "UtcTable":
@@ -128,7 +153,9 @@ class UtcTable:
             if col not in names:
                 raise ParseError(path, f"missing column '{col}'")
             idx[col] = names.index(col)
-        sbg = data[:, idx["timestamp"]].astype(np.int64)
+        # unwrap in FILE order, before the sort below - sorting first would
+        # silently pair post-roll-over clock values with the wrong UTC rows
+        sbg, n_wraps = unwrap_sbg_us(data[:, idx["timestamp"]].astype(np.int64))
         epochs = np.empty(len(data), dtype=np.float64)
         for i, row in enumerate(data):
             try:
@@ -144,11 +171,17 @@ class UtcTable:
         sbg, epochs = sbg[order], epochs[order]
         if len(sbg) >= 2 and not np.all(np.diff(sbg) > 0):
             raise ParseError(path, "duplicate SBG timestamps in utcTime table")
-        return cls(sbg_us=sbg, epoch_s=epochs, path=str(path))
+        return cls(sbg_us=sbg, epoch_s=epochs, path=str(path), n_wraps=n_wraps)
 
     def sbg_to_utc(self, sbg_us) -> np.ndarray:
-        """Linear interpolation; extrapolates linearly at the edges (SBG clock is stable)."""
-        sbg_us = np.asarray(sbg_us, dtype=np.float64)
+        """Linear interpolation; extrapolates linearly at the edges (SBG clock is stable).
+
+        Each file is unwrapped from its own first row, so a trigger file that
+        starts after a roll-over the utcTime file started before sits whole
+        wraps low. It is moved by the whole number of wraps that brings it to
+        the table - never by anything else.
+        """
+        sbg_us = self.align_wraps(sbg_us)
         t0, t1 = float(self.sbg_us[0]), float(self.sbg_us[-1])
         e0, e1 = float(self.epoch_s[0]), float(self.epoch_s[-1])
         out = np.interp(sbg_us, self.sbg_us.astype(np.float64), self.epoch_s)
@@ -157,6 +190,15 @@ class UtcTable:
         out = np.where(below, e0 + (sbg_us - t0) * rate, out)
         out = np.where(above, e1 + (sbg_us - t1) * rate, out)
         return out
+
+    def align_wraps(self, sbg_us) -> np.ndarray:
+        """Shift clock values by whole SBG roll-overs onto this table's span."""
+        x = np.asarray(sbg_us, dtype=np.float64)
+        if x.size == 0:
+            return x
+        mid_table = 0.5 * (float(self.sbg_us[0]) + float(self.sbg_us[-1]))
+        k = np.round((mid_table - float(np.median(x))) / SBG_CLOCK_WRAP_US)
+        return x + k * SBG_CLOCK_WRAP_US
 
     @property
     def max_gap_s(self) -> float:

@@ -178,3 +178,31 @@ class TestRefinedIsIgnored:
         d = tmp_path / "cal"; d.mkdir()
         (d / "PAVE_x_Refined.yaml").write_text("x", encoding="utf-8")
         assert find_pave_calibration(d) is None
+
+
+class TestMountingFileIsPassedOver:
+    """2026-10-09: a camera MOUNTING file was saved as
+    PAVE_262503744_extrinsic.yaml next to the lens files. It was the newest
+    PAVE_*.yaml, had no camera_matrix, and every run after it lost its lens
+    calibration (no scan lines in the viewer). The newest file that really
+    loads as a lens calibration must win."""
+
+    def test_newer_extrinsic_is_skipped(self, tmp_path, synth_cal_dir):
+        import os, shutil, time
+        lens_src = find_pave_calibration(synth_cal_dir)
+        lens = tmp_path / "cal" / "20261008_PaveIntrinsic" / "PAVE_262503744.yaml"
+        lens.parent.mkdir(parents=True)
+        shutil.copy(lens_src, lens)
+        mount = tmp_path / "cal" / "20261008_RearPaveMounting" / "PAVE_262503744_extrinsic.yaml"
+        mount.parent.mkdir(parents=True)
+        mount.write_text("camera_role: PAVE\nserial_number: '262503744'\n"
+                         "lever_arm_mm: {x: -469.9, y: 0.0, z: -905.6}\n", encoding="utf-8")
+        os.utime(mount, (time.time() + 100, time.time() + 100))   # newest by far
+        assert find_pave_calibration(tmp_path / "cal") == lens
+
+    def test_only_invalid_files_still_reports_one(self, tmp_path):
+        d = tmp_path / "cal"; d.mkdir()
+        p = d / "PAVE_262503744_extrinsic.yaml"
+        p.write_text("camera_role: PAVE\n", encoding="utf-8")
+        # handed back so the loader's error names the file in the QC report
+        assert find_pave_calibration(d) == p

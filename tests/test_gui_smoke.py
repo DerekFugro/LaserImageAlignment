@@ -215,6 +215,39 @@ def test_scan_cursor_points_at_a_scan_in_both_views(
 
 
 
+def test_cursor_rezeroes_on_every_new_image(
+        qapp, synth_run_root, synth_cal_dir, tmp_path):
+    """Derek, 2026-10-08: every time the image advances, the laser line goes
+    back to the centre of the image - by Next/Prev and by the slider."""
+    from core import discovery as disc
+    from gui.main_window import MainWindow
+
+    win = MainWindow()
+    win.calibrations_dir = synth_cal_dir
+    win.overrides = disc.OverrideStore(tmp_path / "ov.json")
+    win.open_root(synth_run_root)
+    assert _wait_until(qapp, lambda: len(win.runs) == 1)
+    win.run_panel.run_list.setCurrentRow(0)
+    assert _wait_until(qapp, lambda: win.result is not None)
+    win.current_image = len(win.result.parsed.images) // 2
+    win._show_current_image()
+    assert _wait_until(qapp, lambda: win.profile_view.shown.get("L") is not None)
+
+    win._nudge_scans(+7)
+    assert win._scan_cursor == 7
+    win._step_image(+1)
+    assert win._scan_cursor == 0
+    assert win.scan_reset_action.text() == "Cursor 0"
+    # cursor 0 is the scan under the centre of THIS image
+    marks = win._scan_overlay_lines(win._cam_centre_m)
+    assert f"SCAN {win._cursor_scan()[0]}" in [m[1] for m in marks]
+
+    win._nudge_scans(-3)
+    win._on_distance_slider_value_changed(10)
+    assert win._scan_cursor == 0
+    win.close()
+
+
 def test_undistort_is_on_by_default_and_survives_construction(qapp):
     """It was 'default on' for hours and never actually was: _ensure_undistorter
     unchecked it during __init__, because no run is loaded yet so there is no

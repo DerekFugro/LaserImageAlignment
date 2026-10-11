@@ -17,6 +17,7 @@ from core.calibration import (
     Undistorter, camera_ground_center_m, ground_to_image_row, lens_height_m,
 )
 from core import config
+from core.alignment import along_across_m, scan_ground_positions
 from core.pipeline import RunResult, export_csv, process_run
 from . import styles
 from .image_view import ImageView
@@ -28,6 +29,13 @@ from .workers import Worker
 MARGIN = 8
 LEFT_PANEL_WIDTH = 360
 HALF_SPAN_M = 0.575  # fallback only; derived from the calibration when present
+# GPS placement only uses scans that can be under THIS photo: the lasers are
+# 0.36 m either side of it, and the camera reaches that ground well within a
+# minute. Without these, a scan from another stretch of the route that happens
+# to lie on the photo's heading line - 82 m to the side on 20261008.101916 -
+# was taken as "in the photo".
+GPS_ACROSS_MAX_M = 1.5
+GPS_TIME_MAX_S = 60.0
                      # (see MainWindow._along_track_half_span_m)
 SLIDER_TICKS = 1000
 BATCH_PROGRESS_MS = 250  # how often the batch status line refreshes
@@ -254,6 +262,13 @@ class MainWindow(QMainWindow):
         self._batch_stage: tuple | None = None   # (stage, label, i, total) from the worker
         self._cam_centre_m = float("nan")        # ground under the lens, current image
         self._gocator_extent_m: tuple | None = None   # (start_m, end_m) of laser data
+        # Where each scan sits on the CURRENT photo, metres along the heading
+        # from the photo's centre (GPS mode) or on the run's distance ruler
+        # (fallback). Rebuilt every image - see _viewer_axes.
+        self._view_dist: dict = {}
+        self._view_across: dict = {}
+        self._view_mode = ""
+        self._scan_ground: dict = {}                  # side -> (lat, lon) per profile
         self._scan_cursor = 0                         # cursor offset, in whole profiles
         self._undistort_error = ""                    # why raw, when we wanted undistorted
         self.image_window: ImageWindow | None = None
@@ -381,6 +396,7 @@ class MainWindow(QMainWindow):
             parsed.gocator_r, result.gocator_r_dist_m,
         )
         self._undistorter = None
+        self._scan_ground = self._compute_scan_ground(result)
         loaded = parsed.images is not None and len(parsed.images) > 0
         self._set_run_loaded(loaded)
         if loaded:
@@ -425,7 +441,18 @@ class MainWindow(QMainWindow):
         n = len(self.result.parsed.images)
         target = int(np.clip(self.current_image + delta, 0, n - 1))
         self.current_image = target
+        self._reset_scan_cursor()
         self._show_current_image()
+
+    def _reset_scan_cursor(self):
+        """Back to the scan under the image centre whenever the image changes.
+
+        Derek, 2026-10-08: every time the image advances, the laser line is
+        re-zeroed to the centre of the image. A nudge carried over from the
+        last frame points at a scan that belongs to THAT frame's feature, so
+        each image starts from the centre and is judged on its own."""
+        self._scan_cursor = 0
+        self.scan_reset_action.setText("Cursor 0")
 
     def _on_distance_slider_value_changed(self, value: int):
         if self._slider_updating or self.result is None:
@@ -435,6 +462,7 @@ class MainWindow(QMainWindow):
             return
         target = int(round(value / SLIDER_TICKS * (len(images) - 1)))
         self.current_image = target
+        self._reset_scan_cursor()
         self._show_current_image()
 
     def _show_current_image(self):
@@ -492,16 +520,25 @@ class MainWindow(QMainWindow):
         # selection would slide together by exactly one scan spacing and the
         # pattern would look unchanged — motion you cannot see is no use for
         # lining anything up. So: the plot holds still, the marks slide.
-        cam_centre = self._cam_ground_m(center)
+        cam_centre = self._viewer_axes(j, center)
         self.profile_view.show_window(cam_centre, self._along_track_half_span_m(),
                                       cursor_offset=self._scan_cursor)
-        lines = self._gocator_extent_lines(center)
+        lines = self._gocator_extent_lines()
         lines.extend(self._scan_overlay_lines(cam_centre))
         self.image_view.set_overlay_lines(lines)
         cur = self._cursor_scan()
         if cur is not None:
             row, ground = cur
-            parts.append(f"cursor SCAN {row} @ {ground:.3f} m")
+            if self._view_mode == "gps" and not np.isfinite(ground):
+                parts.append(f"cursor SCAN {row} - not near this photo")
+            elif self._view_mode == "gps":
+                across = self._view_across.get("L")
+                side = f", across {across[row] * 1000:+.0f} mm" if across is not None else ""
+                parts.append(f"cursor SCAN {row} @ {ground * 1000:+.0f} mm from photo "
+                             f"centre (by GPS{side})")
+            else:
+                parts.append(f"cursor SCAN {row} @ {ground:.3f} m (distance ruler - "
+                             f"no GPS for this photo)")
         self.readout_label.setText("   |   ".join(parts))
 
         self._slider_updating = True
@@ -580,6 +617,73 @@ class MainWindow(QMainWindow):
         return camera_ground_center_m(
             trigger_dist_m, res.run.calibrations_dir if res else None)
 
+    def _compute_scan_ground(self, result) -> dict:
+        """side -> (lat, lon) of every scan, once per run. Empty when the run
+        has no trajectory, no PTP solve or no lever arm for a side - the
+        viewer then falls back to the distance ruler for that run."""
+        out = {}
+        parsed = result.parsed if result is not None else None
+        nav = parsed.nav if parsed is not None else None
+        if nav is None:
+            return out
+        arms = parsed.lever_arms or {}
+        for side, goc, ptp in (("L", parsed.gocator_l, result.ptp_l),
+                               ("R", parsed.gocator_r, result.ptp_r)):
+            if goc is None or ptp is None or arms.get(side) is None:
+                continue
+            lat, lon, _ = scan_ground_positions(goc, ptp, nav, arms[side])
+            utc = goc.ptp_us.astype(np.float64) / 1e6 - ptp.offset_s
+            out[side] = (lat, lon, utc)
+        return out
+
+    def _viewer_axes(self, j: int, trigger_dist_m: float) -> float:
+        """Put the current photo and every scan on ONE axis; return the photo
+        centre on it (also kept in self._cam_centre_m).
+
+        GPS mode (Derek, 2026-10-09): the photo's own GPS is its centre row.
+        Each scan has its own GPS. A scan belongs on the photo at
+        (scan - photo centre, along the heading) / mm-per-pixel - position
+        against position, so nothing depends on the travelled-distance ruler,
+        which gained ~1 m standing still at the start of 20261008.102604.
+
+        Fallback (no GPS for this photo or run): the old ruler, camera ground
+        = trigger distance minus the arm. Said so in the readout.
+        """
+        res = self.result
+        al = res.alignment if res is not None else None
+        nav = res.parsed.nav if res is not None else None
+        gps_ok = (al is not None and nav is not None and self._scan_ground
+                  and 0 <= j < len(al.lat_deg)
+                  and np.isfinite(al.lat_deg[j]) and np.isfinite(al.lon_deg[j])
+                  and np.isfinite(al.utc_s[j]))
+        if gps_ok:
+            heading = float(nav.heading_at(np.array([al.utc_s[j]]))[0])
+            gps_ok = np.isfinite(heading)
+        self._view_dist, self._view_across = {}, {}
+        if gps_ok:
+            for side, (lat, lon, utc) in self._scan_ground.items():
+                along, across = along_across_m(al.lat_deg[j], al.lon_deg[j],
+                                               heading, lat, lon)
+                near = (np.abs(across) <= GPS_ACROSS_MAX_M) & \
+                    (np.abs(utc - float(al.utc_s[j])) <= GPS_TIME_MAX_S)
+                along = np.where(near, along, np.nan)    # NaN is never in a window
+                self._view_dist[side] = along
+                self._view_across[side] = across
+            self._view_mode = "gps"
+            centre = 0.0
+        else:
+            self._view_dist = {"L": res.gocator_l_dist_m if res else None,
+                               "R": res.gocator_r_dist_m if res else None}
+            self._view_mode = "dist"
+            centre = self._cam_ground_m(trigger_dist_m) \
+                if np.isfinite(trigger_dist_m) else float("nan")
+        if res is not None:
+            self.profile_view.set_sources(
+                res.parsed.gocator_l, self._view_dist.get("L"),
+                res.parsed.gocator_r, self._view_dist.get("R"))
+        self._cam_centre_m = centre
+        return centre
+
     def _along_track_half_span_m(self) -> float:
         """Radius of the Gocator-profile window, from the calibration when we
         have one so it tracks a lens change; the nominal constant otherwise."""
@@ -606,7 +710,7 @@ class MainWindow(QMainWindow):
         """(profile index, its ground position) for the scan under the cursor."""
         res = self.result
         shown = self.profile_view.shown.get("L") if res else None
-        dist = res.gocator_l_dist_m if res else None
+        dist = self._view_dist.get("L") if res else None
         if shown is None or dist is None:
             return None
         return int(shown[1]), float(dist[int(shown[1])])
@@ -623,7 +727,7 @@ class MainWindow(QMainWindow):
             return []
         cal = res.parsed.calibration
         shown = self.profile_view.shown.get("L")
-        dist = res.gocator_l_dist_m
+        dist = self._view_dist.get("L")
         if cal is None or shown is None or dist is None:
             return []
         rows, cursor = shown
@@ -633,6 +737,12 @@ class MainWindow(QMainWindow):
         out = []
         for r in rows:
             y = ground_to_image_row(float(dist[int(r)]), cam_centre_m, cy, mm_px)
+            if not np.isfinite(y):
+                # stepped onto a scan from elsewhere on the route (GPS mode)
+                if int(r) == int(cursor):
+                    out.append((2.0, f"SCAN {int(r)} - not near this photo",
+                                styles.ACCENT_ORANGE, 3))
+                continue
             if int(r) != int(cursor):
                 out.append((y, "", styles.ACCENT_BLUE, 1))
                 continue
@@ -670,33 +780,37 @@ class MainWindow(QMainWindow):
 
 
 
-    def _gocator_extent_lines(self, trigger_dist_m: float) -> list:
+    def _gocator_extent_lines(self) -> list:
         """Overlay lines marking where Gocator coverage starts/ends on the
         ground shown in the current image (usually visible only on the first
-        and last images of a run)."""
+        and last images of a run). Uses the same axis as the scans themselves
+        (see _viewer_axes), so the green line is where the FIRST scan is."""
         result = self.result
         self._gocator_extent_m = None
-        self._cam_centre_m = self._cam_ground_m(trigger_dist_m) \
-            if np.isfinite(trigger_dist_m) else float("nan")
-        if result is None or not np.isfinite(trigger_dist_m):
+        cam_center = self._cam_centre_m
+        if result is None or not np.isfinite(cam_center):
             return []
         cal = result.parsed.calibration
         if cal is None:
             return []
-        extents = [d for d in (result.gocator_l_dist_m, result.gocator_r_dist_m)
-                   if d is not None and len(d)]
-        if not extents:
+        # first and last scan IN TIME (profile 0 and the final one) - not the
+        # min/max of the axis, which on a GPS axis can be a scan from far away
+        ends = [(float(d[0]), float(d[-1])) for d in
+                (self._view_dist.get("L"), self._view_dist.get("R"))
+                if d is not None and len(d) and np.isfinite(d[0]) and np.isfinite(d[-1])]
+        if not ends:
             return []
-        start_m = min(float(np.min(d)) for d in extents)
-        end_m = max(float(np.max(d)) for d in extents)
+        start_m = min(e[0] for e in ends)
+        end_m = max(e[1] for e in ends)
         self._gocator_extent_m = (start_m, end_m)
-        cam_center = self._cam_ground_m(trigger_dist_m)
         cy = float(cal.camera_matrix[1, 2])
         mm_px = cal.mm_per_px_y(self._lens_height_m())  # rows = along-track -> fy
         lines = []
+        where = ((lambda v: f"{v:+.2f} m from photo centre") if self._view_mode == "gps"
+                 else (lambda v: f"{v:.2f} m"))
         for g, label, color in (
-            (start_m, f"Gocator data starts ({start_m:.2f} m)", styles.ACCENT_GREEN),
-            (end_m, f"Gocator data ends ({end_m:.2f} m)", styles.ACCENT_RED),
+            (start_m, f"Gocator data starts ({where(start_m)})", styles.ACCENT_GREEN),
+            (end_m, f"Gocator data ends ({where(end_m)})", styles.ACCENT_RED),
         ):
             row = ground_to_image_row(g, cam_center, cy, mm_px)
             lines.append((row, label, color))  # off-image rows skipped by the view
