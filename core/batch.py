@@ -1072,6 +1072,10 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
             # 2026-09-02 this re-read the arm with no calibrations_dir and
             # fell back to the built-in constant, so an edit to the file
             # moved every stamped position but not one filename.
+            if cam_name in NO_RENAME_CAMERAS:
+                o.notes.append(f"RENAME {cam_name}: off - original ACS names kept, "
+                               "nothing moved to BeforeCollection (GPS still written)")
+                continue
             arm_xyz = arms.get(cam_name)
             mm = section_distance_mm(
                 al, nav, entry, None if arm_xyz is None else -float(arm_xyz[0]),
@@ -1095,6 +1099,12 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
                                f"before the section — moved to BeforeCollection/")
             for e in probs:
                 o.warnings.append(f"before-collection {cam_name}: {e}")
+
+
+# Cameras whose photos are NOT renamed or moved to BeforeCollection - they get
+# GPS only and keep their original ACS names (Derek, 2026-10-13: ROW naming is
+# being changed, so stop renaming it for now). Remove a name to turn it back on.
+NO_RENAME_CAMERAS = {"ROW"}
 
 
 def _startup_frames(al, arms, cam_name) -> list[int]:
@@ -1197,8 +1207,10 @@ def _process_one(run: disc.RunPaths, write_images: bool, write_gocator: bool,
                         f"start-up frame {cam_name}/{cam_al.images.files[j]}: "
                         f"could not clear old GPS: {exc}")
             if startup:
-                out.notes.append(f"{cam_name}: photo 1 is the camera start-up frame "
-                                 "(no trigger) - no GPS, filed in BeforeCollection")
+                out.notes.append(
+                    f"{cam_name}: photo 1 is the camera start-up frame (no trigger) - no GPS, "
+                    + ("left in place (this camera is not renamed)"
+                       if cam_name in NO_RENAME_CAMERAS else "filed in BeforeCollection"))
             for j in range(len(cam_al.images)):
                 if j in startup:
                     continue

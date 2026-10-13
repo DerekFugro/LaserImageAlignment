@@ -326,7 +326,11 @@ def test_process_collection_always_renames(synth_run_root, synth_cal_dir, tmp_pa
     o = next(x for x in report.outcomes if x.run_id == "20260816.150000")
     assert o.status in ("written", "partial")
     assert any(n.startswith("RENAME Rear:") for n in o.notes)
-    assert any(n.startswith("RENAME ROW:") for n in o.notes)
+    assert any(n.startswith("RENAME ROW: off") for n in o.notes)
+    # ROW is not renamed for now (Derek, 2026-10-13): GPS only, names kept
+    row_dir = root / "Images" / "20260816.150000" / "ROW"
+    assert not (row_dir / MANIFEST_NAME).exists()
+    assert not (row_dir / "BeforeCollection").exists()
     rear = root / "Images" / "20260816.150000" / "Rear"
     assert (rear / MANIFEST_NAME).exists()
     n_jpg = len(list(rear.glob("*.jpg")))
@@ -568,12 +572,15 @@ def test_a_first_pass_unplaced_row_is_still_blank(tmp_path):
 
 
 def test_batch_rename_uses_the_arm_from_the_lever_arm_file(
-        synth_run_root, synth_cal_dir, tmp_path):
+        synth_run_root, synth_cal_dir, tmp_path, monkeypatch):
     """The rename step must use the arm the EXIF was written from - the
     run's lever-arm file. It used to re-read the arm with no calibrations_dir
     and fall back to the built-in constant, so editing the file moved every
     stamped position but no filename (Derek's 20260821 batch: ROW names sat
     762 mm behind Rear while the file said 24 mm)."""
+    # ROW renaming is switched off for now (batch.NO_RENAME_CAMERAS, Derek
+    # 2026-10-13); this test checks the rename LOGIC, so turn it back on here.
+    monkeypatch.setattr("core.batch.NO_RENAME_CAMERAS", set())
     from core.batch import process_collection
     from core.calibration import LEVER_ARMS_FILENAME
     from core.discovery import OverrideStore
