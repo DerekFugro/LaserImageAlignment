@@ -63,12 +63,27 @@ def test_parse_daily_keys_by_stamp_and_reads_columns(tmp_path):
     assert r.lat_beg == pytest.approx(45.106)
 
 
-def test_parse_daily_skips_bad_rows(tmp_path):
+def test_parse_daily_keeps_a_bad_stamped_row_and_says_why(tmp_path):
+    """Rows without a stamp are skipped; a stamped row is never dropped -
+    it is kept with `problem` set, so its run is not "no row in the Daily"."""
     p = _write_daily(tmp_path, [
         "no stamp here,200180,N,1,2,45,-75,0\n",
         "Video [20260824.101724] run,200180,N,notanumber,2,45,-75,0\n",
     ])
-    assert parse_daily(p) == {}
+    d = parse_daily(p)
+    assert set(d) == {"20260824.101724"}
+    assert "From = 'notanumber' is not a number" in d["20260824.101724"].problem
+
+
+def test_parse_daily_blank_start_point_is_fine(tmp_path):
+    """20261015.165518: Status C, LatBeg/LongBeg blank, CollLength 0. It was
+    dropped and reported as 'no row'. Names do not need the start point."""
+    p = _write_daily(tmp_path, [
+        "Video [20260824.101724] run,200180,N,2.761,3.069,,,0\n",
+    ])
+    e = parse_daily(p)["20260824.101724"]
+    assert e.problem == "" and not e.has_start_point
+    assert e.from_km == pytest.approx(2.761)
 
 
 def test_find_daily_file(tmp_path):

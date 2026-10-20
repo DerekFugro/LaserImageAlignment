@@ -125,6 +125,7 @@ def preflight(root: Path, calibrations_dir: Path | None = None,
     report.exif_ok, report.exif_note = ensure_piexif()
     nav_cache: dict = {}
     sbg_days: dict = {}      # root -> days with an SBG session, found once
+    daily_rows = disc._daily_entries(Path(root), daily_path)
     for run in disc.discover_runs(root, calibrations_dir=calibrations_dir,
                                   overrides=overrides, daily_path=daily_path):
         pf = RunPreflight(run_id=run.run_id)
@@ -133,6 +134,16 @@ def preflight(root: Path, calibrations_dir: Path | None = None,
         for key in (disc.KEY_GOCATOR_L, disc.KEY_GOCATOR_R):
             if run.get(key):
                 pf.gocator_files.append(run.get(key))
+
+        # A kept Daily row the app cannot read: skipped, and SAID - never
+        # "no row in the Daily" (daily.parse_daily keeps such rows).
+        entry = daily_rows.get(run.run_id)
+        if entry is not None and entry.problem:
+            pf.ready = False
+            pf.reason = (f"in the ACS Daily file (Status {entry.status or '?'}) but "
+                         f"its row could not be read: {entry.problem}")
+            report.runs.append(pf)
+            continue
 
         for key in run.missing():
             if key not in disc.OPTIONAL_KEYS:
@@ -1077,7 +1088,12 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
         if res.camera_alignments:
             any_al = next(iter(res.camera_alignments.values()))
             miss = daily_start_miss_m(any_al, nav, entry, start_utc)
-            if np.isfinite(miss) and miss > DAILY_START_WARN_M:
+            if not entry.has_start_point:
+                o.notes.append(
+                    "daily start: the ACS Daily row has no section-start point "
+                    "(LatBeg/LongBeg blank) - names count from the session start "
+                    "as always; the Daily-start check could not be made")
+            elif np.isfinite(miss) and miss > DAILY_START_WARN_M:
                 o.warnings.append(
                     f"daily start: the ACS Daily start point is {miss:.1f} m from where "
                     f"this session started - names count from the session start, so "

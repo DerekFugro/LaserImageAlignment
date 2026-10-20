@@ -115,6 +115,25 @@ def test_a_run_without_its_days_sbg_data_is_skipped_and_says_why(tmp_path):
     assert pf.reason.startswith("no SBG data for this day (20261014)")
 
 
+def test_an_unreadable_daily_row_is_skipped_by_name_not_ignored(tmp_path):
+    """A kept row the app cannot read must be SKIPPED with that reason, so it
+    reaches run_mapping.csv and the exit code - never 'no row in the Daily'."""
+    from core.batch import preflight
+    day = tmp_path / "20261015"
+    day.mkdir()
+    (day / "Daily_ARAN01_20261015.csv").write_text(
+        "FILENAME,HEADER,Direction,From,To,LatBeg,LongBeg,Status\n"
+        "[20261015.165518],313640,5,,3.069,,,C\n", encoding="utf-8-sig")
+    cam = tmp_path / "Images" / "20261015.165518" / "Rear"
+    cam.mkdir(parents=True)
+    (cam / "000000000750.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    pf = preflight(tmp_path, calibrations_dir=tmp_path).runs
+    assert [p.run_id for p in pf] == ["20261015.165518"]
+    assert not pf[0].ready
+    assert pf[0].reason.startswith("in the ACS Daily file (Status C) but its row "
+                                   "could not be read: From is blank")
+
+
 # --- 2 + 3. exit code and the stderr reason line ----------------------------
 
 def _report(**kw):

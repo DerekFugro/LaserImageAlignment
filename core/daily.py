@@ -13,6 +13,7 @@ failed to produce an image. See read_qc_video() below.
 from __future__ import annotations
 
 import csv
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,17 @@ class DailyEntry:
     lat_beg: float
     lon_beg: float
     status: str = ""      # Status column, verbatim: 'C' collected, 'x' excluded
+    # Why this row cannot be used, when it cannot ("" = fine). The row is
+    # still KEPT so the run is reported as what it is - in the Daily, not
+    # readable - and never as "no row in the Daily" (2026-10-20).
+    problem: str = ""
+
+    @property
+    def has_start_point(self) -> bool:
+        """LatBeg/LongBeg were given. ACS leaves them blank on some rows
+        (20261015.165518: blank, with CollLength 0 and Speed 0). Names count
+        from the session start, so only the Daily-start CHECK needs them."""
+        return math.isfinite(self.lat_beg) and math.isfinite(self.lon_beg)
 
     @property
     def ascending(self) -> bool:
@@ -121,14 +133,22 @@ def find_daily_file(root: Path, daily_path: Path | None = None) -> Path | None:
 
 
 def parse_daily(path: Path) -> dict[str, DailyEntry]:
-    """run_id -> DailyEntry. Rows without a [stamp] or coordinates are skipped
-    (the file carries a blank spacer row after the header).
+    """run_id -> DailyEntry. Rows without a [stamp] are skipped (the file
+    carries a blank spacer row after the header).
 
     Rows marked X are KEPT, with .excluded True. Dropping them here would be
     easier and worse: the run_mapping.csv row for such a run would then read
     "in the ACS Daily file but no folders on disk", which is a different and
     untrue statement. Excluding a run is a decision, and the record should say
     the decision was made.
+
+    A stamped row is NEVER dropped (2026-10-20). Until then a row with a
+    blank LatBeg/LongBeg failed float() and vanished, and its run was
+    reported as "no row in the ACS Daily file": 20261015.165518 (Status C,
+    all its data on disk) was silently left out of a batch that exited 0.
+    A blank start point is now NaN - names count from the session start,
+    only the Daily-start check needs it. Anything else unreadable keeps the
+    row with `problem` set, and preflight skips the run with that reason.
     """
     out: dict[str, DailyEntry] = {}
     with open(path, newline="", encoding="utf-8-sig") as fh:
@@ -136,19 +156,35 @@ def parse_daily(path: Path) -> dict[str, DailyEntry]:
             m = STAMP_RE.search(row.get("FILENAME") or "")
             if not m:
                 continue
-            try:
-                out[m.group(1)] = DailyEntry(
-                    run_id=m.group(1),
-                    section=str(row["HEADER"]).strip(),
-                    direction=str(row.get("Direction", "")).strip(),
-                    from_km=float(row["From"]),
-                    to_km=float(row["To"]),
-                    lat_beg=float(row["LatBeg"]),
-                    lon_beg=float(row["LongBeg"]),
-                    status=str(row.get("Status") or "").strip(),
-                )
-            except (KeyError, ValueError, TypeError):
-                continue
+            problems = []
+
+            def num(key, blank_ok=False):
+                raw = row.get(key)
+                text = "" if raw is None else str(raw).strip()
+                if not text:
+                    if not blank_ok:
+                        problems.append(f"{key} is blank")
+                    return float("nan")
+                try:
+                    return float(text)
+                except ValueError:
+                    problems.append(f"{key} = {text!r} is not a number")
+                    return float("nan")
+
+            section = str(row.get("HEADER") or "").strip()
+            if not section:
+                problems.append("HEADER (section) is blank")
+            out[m.group(1)] = DailyEntry(
+                run_id=m.group(1),
+                section=section,
+                direction=str(row.get("Direction") or "").strip(),
+                from_km=num("From"),
+                to_km=num("To"),
+                lat_beg=num("LatBeg", blank_ok=True),
+                lon_beg=num("LongBeg", blank_ok=True),
+                status=str(row.get("Status") or "").strip(),
+                problem="; ".join(problems),
+            )
     return out
 
 
