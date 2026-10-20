@@ -650,6 +650,42 @@ def merge_shared_dmi(report: QCReport) -> None:
     report.checks.append(merged)
 
 
+def pairing_offsets(report: QCReport) -> dict:
+    """camera -> k (photo n <- trigger n+k) from the pipeline's
+    align.camera.<cam>.pairing rows; empty when the pairing was not run."""
+    out = {}
+    for c in report.checks:
+        if c.check_id.startswith("align.camera.") and c.check_id.endswith(".pairing"):
+            k = (c.values or {}).get("k")
+            if k is not None:
+                out[c.check_id[len("align.camera."):-len(".pairing")]] = int(k)
+    return out
+
+
+def match_summary(report: QCReport, match, n_images: int) -> str:
+    """The one-line pairing for a run summary. "match k=-5" was photos minus
+    triggers, which read like the pairing and was not (094844: k=-5 while
+    Rear was photo n = trigger n+4). Says the pairing per camera and how it
+    was decided; falls back to the old count line for a camera with no
+    trigger delay (no pairing row)."""
+    rows = [c for c in report.checks
+            if c.check_id.startswith("align.camera.") and c.check_id.endswith(".pairing")
+            and (c.values or {}).get("k") is not None]
+    if not rows:
+        return (f"match k={match.shift_k:+d}, {match.n_matched}/{n_images} images")
+    parts = []
+    for c in rows:
+        cam = c.check_id[len("align.camera."):-len(".pairing")]
+        v = c.values
+        how = {"camera log": "camera log", "camera start": "camera start",
+               "assumed": "assumed"}.get(v.get("method"), v.get("method", ""))
+        if v.get("method") == "camera start" and not v.get("confident"):
+            how = "estimated"
+        parts.append(f"{cam} n{int(v['k']):+d} ({how})")
+    return ("pairing photo n = trigger " + ", ".join(parts)
+            + f"; {match.n_matched}/{n_images} images matched")
+
+
 def check_content(pr: ParsedRun, report: QCReport,
                   triggers: TriggerData | None = None,
                   ptp_l: PtpOffsetResult | None = None,
@@ -682,7 +718,26 @@ def check_content(pr: ParsedRun, report: QCReport,
     # camera folder would fire on that every single run.
     counts = {name: len(im) + getattr(im, "n_set_aside", 0)
               for name, im in (pr.cameras or {}).items()}
-    if len(set(counts.values())) > 1:
+    # A camera that was ready later missed more triggers at the start, so it
+    # holds fewer photos and that is not a loss. With photo n <- trigger n+k
+    # (core/cameralog.py, run by the pipeline before this check), photos + k
+    # is the same for every camera when the cameras stop together:
+    # 20261014.094844 Rear 323 + 4 = ROW 325 + 2 (Derek, 2026-10-20).
+    pairing = pairing_offsets(report)
+    explained = (len(set(counts.values())) > 1 and set(counts) <= set(pairing)
+                 and len({counts[c] + pairing[c] for c in counts}) == 1)
+    if explained:
+        detail = ", ".join(f"{n}: {c} (photo n = trigger n{pairing[n]:+d})"
+                           for n, c in sorted(counts.items()))
+        report.add(
+            "content.camera_counts", "Cameras hold the same image count",
+            Severity.PASS,
+            f"cameras differ ({detail}) - explained by the pairing: the camera "
+            "with fewer photos was ready later and missed more triggers at the "
+            "start. Nothing is missing",
+            counts=counts, explained=True,
+        )
+    elif len(set(counts.values())) > 1:
         detail = ", ".join(f"{n}: {c}" for n, c in sorted(counts.items()))
         short = min(counts, key=counts.get)
         report.add(
@@ -739,7 +794,31 @@ def check_content(pr: ParsedRun, report: QCReport,
                        "first/last images have valid JPEG headers")
 
     # Trigger count vs image count
-    if pr.images is not None and pr.triggers_sbg_us is not None:
+    primary = next((n for n, im in (pr.cameras or {}).items() if im is pr.images), None)
+    if (pr.images is not None and pr.triggers_sbg_us is not None
+            and primary in pairing):
+        # With the pairing known, the count is checked against it rather
+        # than "small offsets are normal": photo n <- trigger n+k, so the
+        # camera should hold n_trg - k photos (094844 Rear: 328 triggers,
+        # k=+4 -> 324). A few short at the end is the cameras stopping
+        # while still moving; more photos than that is not explained.
+        k = pairing[primary]
+        n_img = len(pr.images) + int(getattr(pr.images, "n_set_aside", 0) or 0)
+        n_trg = len(pr.triggers_sbg_us)
+        extra = n_img - (n_trg - k)
+        ok = -3 <= extra <= 0
+        report.add(
+            "content.trigger_count", "Trigger vs image count",
+            Severity.PASS if ok else Severity.WARN,
+            f"{n_trg} triggers, {n_img} {primary} photos, photo n = trigger n{k:+d}: "
+            + ("counts fit" if extra == 0 else
+               f"{-extra} trigger(s) at the end got no photo (cameras stopped "
+               "while moving)" if extra < 0 else
+               f"{extra} photo(s) more than the pairing explains")
+            + ("" if ok else " - check this run"),
+            n_triggers=n_trg, n_images=n_img, k=k, extra=extra,
+        )
+    elif pr.images is not None and pr.triggers_sbg_us is not None:
         n_img, n_trg = len(pr.images), len(pr.triggers_sbg_us)
         sev = Severity.PASS if abs(n_img - n_trg) <= 3 else Severity.WARN
         report.add(

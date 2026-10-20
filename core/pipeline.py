@@ -85,10 +85,16 @@ def process_run(run: disc.RunPaths) -> RunResult:
         result.ptp_l = solve_ptp_offset(parsed.gocator_l, ruler)
     if parsed.gocator_r is not None and ruler is not None:
         result.ptp_r = solve_ptp_offset(parsed.gocator_r, ruler)
+    # which trigger took photo n, per camera (camera log first - see
+    # core/cameralog.py). photo_lag = -k for photo n <- trigger n+k.
+    lags: dict = {}
+    if result.triggers is not None:
+        lags = _pairing(run, parsed, result.triggers, report)
     if parsed.images is not None and result.triggers is not None:
+        primary = _camera_name_of(parsed, parsed.images)
         result.match = match_images_to_triggers(
             parsed.images, result.triggers,
-            photo_lag=_photo_lag(parsed, _camera_name_of(parsed, parsed.images)))
+            photo_lag=lags.get(primary, _photo_lag(parsed, primary)))
         report.add(
             "align.match", "Image-trigger match",
             Severity.PASS if result.match.n_matched else Severity.FAIL,
@@ -129,7 +135,8 @@ def process_run(run: disc.RunPaths) -> RunResult:
         for cam_name, cam_images in parsed.cameras.items():
             delay = cal.trigger_delay_s(parsed.lever_arms, cam_name)
             cam_match = match_images_to_triggers(
-                cam_images, result.triggers, photo_lag=_photo_lag(parsed, cam_name))
+                cam_images, result.triggers,
+                photo_lag=lags.get(cam_name, _photo_lag(parsed, cam_name)))
             result.camera_matches[cam_name] = cam_match
             # The whole (X, Y, Z) from the lever-arm file - the one parsed
             # for THIS run (parsed.lever_arms, from run.paths), not a
@@ -143,8 +150,9 @@ def process_run(run: disc.RunPaths) -> RunResult:
             report.add(
                 f"align.camera.{cam_name}.delay", f"Camera '{cam_name}' trigger delay",
                 Severity.PASS,
-                (f"picture taken {delay * 1000:.0f} ms after its trigger; photo n "
-                 f"paired with trigger n-1 (lever-arm file)" if delay is not None else
+                (f"picture taken {delay * 1000:.0f} ms after its trigger (lever-arm "
+                 f"file); pairing: see align.camera.{cam_name}.pairing"
+                 if delay is not None else
                  "no trigger delay in the lever-arm file - photo n paired with "
                  "trigger n, placed at the trigger time (not verified for this camera)"),
                 delay_s=delay)
@@ -211,6 +219,34 @@ def _photo_lag(parsed, cam_name) -> int:
     """1 when the lever-arm file gives this camera a trigger delay (its photo
     n is the picture taken after trigger n-1), else 0."""
     return 1 if cal.trigger_delay_s(parsed.lever_arms, cam_name) is not None else 0
+
+
+def _pairing(run, parsed, triggers, report) -> dict:
+    """photo_lag per camera that has a trigger delay, decided in Derek's order
+    (2026-10-20): camera log frame times, then the camera start, then photo n
+    = trigger n-1 assumed. Cameras without a delay keep the old rule (lag 0).
+    One report row per camera; the run is written in every case, but anything
+    not confirmed is a WARN so it gets a look."""
+    from . import cameralog
+    log_path = run.get(disc.KEY_CAMERA_LOG)
+    lags = {}
+    for cam_name, cam_images in (parsed.cameras or {}).items():
+        delay = cal.trigger_delay_s(parsed.lever_arms, cam_name)
+        if delay is None:
+            continue
+        n_photos = len(cam_images) + int(getattr(cam_images, "n_set_aside", 0) or 0)
+        r = cameralog.decide(log_path, run.run_id, cam_name, triggers.utc_s,
+                             delay, n_photos)
+        lags[cam_name] = -int(r.k)
+        ok = r.confident and "COUNT DOES NOT FIT" not in r.message
+        report.add(
+            f"align.camera.{cam_name}.pairing", f"Camera '{cam_name}' photo-trigger pairing",
+            Severity.PASS if ok else Severity.WARN, r.message,
+            k=int(r.k), method=r.method, confident=bool(r.confident),
+            camera_log=str(log_path) if log_path else "")
+    # different photo counts per camera are judged in qc.check_content
+    # (content.camera_counts), which reads these rows
+    return lags
 
 
 def _recover_pre_collection_triggers(parsed, report) -> tuple[np.ndarray, int]:

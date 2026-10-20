@@ -21,7 +21,7 @@ from .alignment import PTP_PASS_MAX_DEV_S, scan_ground_positions
 from .formats import GOCATOR_META_COLS, TAI_UTC_NOMINAL_S
 from .geotag import clear_gps, ensure_piexif, geotag_image, inject_gocator_gps
 from .pipeline import RunResult, export_csv, process_run
-from .qc import TARGET_CSV, TARGET_IMAGES, TARGETS
+from .qc import TARGET_CSV, TARGET_IMAGES, TARGETS, match_summary
 
 
 @dataclass
@@ -475,8 +475,9 @@ class BatchReport:
                 lines.append(f"         PTP offset {p.offset_s:.3f} s fixed"
                          + (f", fit {p.fitted_offset_s:.3f}" if getattr(p, "fitted_offset_s", None) is not None else "")
                          + f" (r={p.r:.3f})"
-                             + (f" | match k={m.shift_k:+d}, {m.n_matched}/"
-                                f"{len(o.result.parsed.images or [])} images" if m else ""))
+                             + (" | " + match_summary(o.result.report, m,
+                                                      len(o.result.parsed.images or []))
+                                if m else ""))
             for f in _collapse(o.failures):
                 lines.append(f"         FAIL: {f}")
             for w in o.warnings:

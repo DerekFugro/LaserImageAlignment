@@ -406,8 +406,9 @@ class MainWindow(QMainWindow):
         if result.ptp_l is not None:
             summary.append(f"PTP {result.ptp_l.offset_s:.2f} s (r={result.ptp_l.r:.3f})")
         if result.match is not None:
-            summary.append(f"match k={result.match.shift_k:+d}, "
-                           f"{result.match.n_matched}/{len(parsed.images or [])} images")
+            from core.qc import match_summary
+            summary.append(match_summary(result.report, result.match,
+                                         len(parsed.images or [])))
         n_fail = len(result.report.failed)
         summary.append(f"{n_fail} QC failure(s)" if n_fail else "QC clean")
         self.readout_label.setText(f"{result.run.run_id}: " + "; ".join(summary))

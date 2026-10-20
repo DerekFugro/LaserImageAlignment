@@ -60,7 +60,8 @@ class TestSyntheticEndToEnd:
     def result(self, synth_run_root, synth_cal_dir):
         runs = discover_runs(synth_run_root, calibrations_dir=synth_cal_dir)
         assert len(runs) == 1
-        assert runs[0].missing() == []
+        # the synthetic run has no camera log (optional - pairing is assumed)
+        assert runs[0].missing() in ([], ["camera_log"])
         return process_run(runs[0])
 
     def test_ptp_offset_recovered(self, result):

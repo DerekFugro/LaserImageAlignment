@@ -53,10 +53,12 @@ KEY_NAV_EXPORT = "nav_export"
 KEY_CALIBRATION = "calibration"
 KEY_EVENTS_EXPORT = "events_export"
 KEY_LEVER_ARMS = "lever_arms"
+KEY_CAMERA_LOG = "camera_log"
 
 REQUIRED_KEYS = [
     KEY_IMAGES, KEY_GOCATOR_L, KEY_GOCATOR_R, KEY_EVENT_A,
     KEY_UTC_TIME, KEY_DMI, KEY_NAV_EXPORT, KEY_CALIBRATION, KEY_LEVER_ARMS,
+    KEY_CAMERA_LOG,
 ]
 # KEY_LEVER_ARMS is REQUIRED and not optional (Derek, 2026-09-02): every
 # written position has an arm in it, so without the file there is nothing
@@ -75,7 +77,9 @@ REQUIRED_KEYS = [
 #   EVENTS:      recovers the pre-collection trigger of each run. Without it
 #                every run's first image simply stays unplaced, exactly as
 #                before this file existed — nothing else changes.
-OPTIONAL_KEYS = {KEY_DMI, KEY_CALIBRATION, KEY_EVENTS_EXPORT}
+#   CAMERA LOG:  says which trigger took each photo (core/cameralog.py).
+#                Without it photo n = trigger n-1 is assumed, with a WARN.
+OPTIONAL_KEYS = {KEY_DMI, KEY_CALIBRATION, KEY_EVENTS_EXPORT, KEY_CAMERA_LOG}
 
 KEY_DESCRIPTIONS = {
     KEY_IMAGES: "Primary camera image folder (Images/<run>/Rear) — shown in the viewer; "
@@ -92,6 +96,9 @@ KEY_DESCRIPTIONS = {
     KEY_EVENTS_EXPORT: "Qinertia Events-output.txt — one row per camera trigger for the "
                        "WHOLE session, including the triggers that fired before ACS "
                        "started collecting (which is every run's first image)",
+    KEY_CAMERA_LOG: "ACS camera log (Logs/<PC>/<PC>-VideoLogCXP.log) - says which trigger "
+                    "took each photo. The log rolls over, so a run's lines can be in the "
+                    "NEXT day's upload; without it photo n = trigger n-1 is assumed",
 }
 
 
@@ -384,6 +391,8 @@ def discover_runs(root: Path, calibrations_dir: Path | None = None,
     nav_files = _session_files(root, NAV_EXPORT_NAME)
     event_files = _session_files(root, EVENTS_FILENAME)
     calibration = find_pave_calibration(calibrations_dir)
+    from . import cameralog
+    camera_logs = cameralog.find_logs(root)
     runs: list[RunPaths] = []
     stamps, paired, sbg_dirs = _run_stamps_and_loggers(root)
     for stamp in stamps:
@@ -421,6 +430,9 @@ def discover_runs(root: Path, calibrations_dir: Path | None = None,
         p[KEY_EVENTS_EXPORT] = pick_session_file(event_files, stamp)
         p[KEY_CALIBRATION] = calibration
         p[KEY_LEVER_ARMS] = lever_arms
+        # the camera log that covers this run, if the collection has one
+        # (none -> Locate one; the log rolls over, so it can be next day's)
+        p[KEY_CAMERA_LOG] = cameralog.pick_log(camera_logs, stamp) if camera_logs else None
 
         run = RunPaths(run_id=stamp, root=str(root), paths=p, cameras=cameras,
                        sbg_stamp=sbg_stamp, sbg_skew_s=sbg_skew,

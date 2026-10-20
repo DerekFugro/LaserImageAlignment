@@ -71,6 +71,29 @@ class TestCamerasMustAgree:
     def test_no_cameras_raises_nothing(self):
         assert "content.camera_counts" not in run_checks({})
 
+    @staticmethod
+    def _with_pairing(cameras, ks):
+        run = disc.RunPaths(run_id="20261014.094844", root="synthetic")
+        pr = ParsedRun(run=run)
+        pr.cameras = cameras
+        report = QCReport(run_id=run.run_id)
+        for cam, k in ks.items():
+            report.add(f"align.camera.{cam}.pairing", "pairing", Severity.PASS, "", k=k)
+        check_content(pr, report)
+        return {c.check_id: c for c in report.checks}["content.camera_counts"]
+
+    def test_a_camera_ready_later_is_not_a_loss(self):
+        """20261014.094844: Rear missed 4 triggers at the start, ROW 2, so
+        Rear holds 2 fewer photos and nothing is missing."""
+        c = self._with_pairing({"Rear": images(323), "ROW": images(325)},
+                               {"Rear": 4, "ROW": 2})
+        assert c.severity is Severity.PASS and "explained" in c.message
+
+    def test_the_pairing_does_not_hide_a_real_loss(self):
+        c = self._with_pairing({"Rear": images(318), "ROW": images(325)},
+                               {"Rear": 4, "ROW": 2})
+        assert c.severity is Severity.WARN and "missing 7" in c.message
+
 
 class TestEveryCameraGetsASequenceCheck:
     """The existing check only ever looked at the PRIMARY camera, so a hole

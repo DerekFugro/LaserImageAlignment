@@ -343,7 +343,13 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData,
     # firing on housekeeping the app did itself. The SHIFT stays k: the images
     # that remain are the tail, which is exactly what this matcher anchors on.
     unexplained = k + getattr(images, "n_set_aside", 0)
-    if abs(unexplained) > MATCH_MAX_SHIFT:
+    mode = mode or PAIRING_MODE
+    # Head mode counts from the front, so a count gap at the END (cameras
+    # stopped while still moving, or triggers before the cameras were ready -
+    # 094844 lost 4) does not move anyone; which trigger took photo n comes
+    # from the camera log (core/cameralog.py) and the pipeline reports how
+    # sure it is. The ±3 refusal stays for the tail rule, which it protects.
+    if mode != "head" and abs(unexplained) > MATCH_MAX_SHIFT:
         return MatchResult(
             shift_k=k, d0_m=0.0,
             trigger_for_image=np.full(n_img, -1, dtype=np.int64),
@@ -374,7 +380,6 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData,
     # `unexplained` is the run's ORIGINAL images-minus-triggers. When it is
     # negative the first -unexplained triggers never had an image, so the
     # placed ones - and with them the set-aside block - start after those.
-    mode = mode or PAIRING_MODE
     if mode == "head":
         # Photo n (its ORIGINAL counter, 750 x n mm - kept through renames by
         # the manifest, so images already filed into BeforeCollection do not
@@ -413,7 +418,7 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData,
         residual_m=residual, scale_a=float(a), median_abs_residual_m=med_abs,
         n_matched=n_matched, n_unmatched=n_unmatched,
         message=(
-            ((f"head match (photo n = trigger n-{int(photo_lag)}, camera trigger delay): "
+            ((f"head match (photo n = trigger n{-int(photo_lag):+d}): "
               if photo_lag else
               f"head match (photo n = trigger n, no extra front photo assumed): ")
              + f"{n_matched}/{n_img} images matched"
@@ -421,10 +426,12 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData,
                 f"photo got none (cameras stopped while moving?)"
                 if n_matched and int(trigger_for_image.max()) < n_trg - 1 else "")
              + (f", photo 1 is the camera start-up frame (no trigger, no GPS)"
-                if photo_lag and n_img and int(trigger_for_image[0]) < 0 else "")
-             + (f", {int(np.sum(trigger_for_image[1 if photo_lag else 0:] < 0))} photo(s) "
+                if photo_lag > 0 and n_img and int(trigger_for_image[0]) < 0 else "")
+             + (f", {int(photo_lag) * -1} trigger(s) before photo 1 had no photo "
+                f"(cameras not ready yet)" if photo_lag < 0 else "")
+             + (f", {int(np.sum(trigger_for_image[1 if photo_lag > 0 else 0:] < 0))} photo(s) "
                 f"beyond the last trigger"
-                if np.any(trigger_for_image[1 if photo_lag else 0:] < 0) else "")
+                if np.any(trigger_for_image[1 if photo_lag > 0 else 0:] < 0) else "")
              if mode == "head" else
              f"ordinal match, shift k = {k:+d} (tail-anchored): {n_matched}/{n_img} images matched"
              + (f", {n_unmatched} unmatched at the start (pre-collection triggers)" if k > 0 else
