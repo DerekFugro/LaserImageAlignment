@@ -22,6 +22,7 @@ from .formats import GOCATOR_META_COLS, TAI_UTC_NOMINAL_S
 from .geotag import clear_gps, ensure_piexif, geotag_image, inject_gocator_gps
 from .pipeline import RunResult, export_csv, process_run
 from .qc import TARGET_CSV, TARGET_IMAGES, TARGETS, match_summary
+from .version import app_version
 
 
 @dataclass
@@ -404,6 +405,9 @@ class BatchReport:
             f"started: {self.started_utc}",
             "arms:    " + ("; ".join(arms) if arms else
                            "NO LEVER-ARM FILE - nothing was written"),
+            # after arms:, so every line above keeps its place for anything
+            # that reads the header by position
+            f"app:     {app_version()}",
             f"runs:    {len(self.outcomes)}  "
             f"({len(self.written)} written, {len(self.partial)} partial, "
             f"{len(self.needs_attention) - len(self.partial)} need attention)",
