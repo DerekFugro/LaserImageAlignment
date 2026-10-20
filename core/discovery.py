@@ -280,19 +280,45 @@ def pick_session_file(files: list[tuple[float | None, Path]],
     was skipped. The choice is still verified by that same coverage check;
     this only makes sure the right file is the one being checked.
 
-    Falls back to the first file - the old behaviour - when the sessions
-    carry no stamps or the run predates all of them, so a collection laid
-    out any other way behaves exactly as it did.
+    ONLY THE RUN'S OWN DAY (2026-10-20). A run that predated every session
+    used to fall back to the first export on disk - another day's. On
+    103_ProcessTest (days 14 and 15, SBG data for day 15 only) every day-14
+    run got 20261015.075722_0001. Nothing was written, because those runs
+    had no DataLogger either, but a day that did would have been placed on
+    another day's trajectory. Now a session from another date is never
+    used: no session from the run's own day returns None, and preflight
+    skips the run as "no SBG data for this day".
+
+    Within the run's day, a run that started before every session takes the
+    earliest one (the coverage check still verifies it). Sessions whose
+    folders carry no stamp keep the old first-file behaviour, since there is
+    no date to check.
     """
     if not files:
         return None
+    stamped = [(t, p) for t, p in files if t is not None]
     t_run = _stamp_epoch_s(run_stamp)
-    if t_run is not None:
-        started = [(t, p) for t, p in files
-                   if t is not None and t <= t_run + SESSION_TOLERANCE_S]
-        if started:
-            return max(started, key=lambda tp: (tp[0], str(tp[1])))[1]
-    return files[0][1]
+    if not stamped or t_run is None:
+        return files[0][1]
+    day = run_stamp[:8]
+    same_day = [(t, p) for t, p in stamped if _epoch_day(t) == day]
+    if not same_day:
+        return None
+    started = [(t, p) for t, p in same_day if t <= t_run + SESSION_TOLERANCE_S]
+    if started:
+        return max(started, key=lambda tp: (tp[0], str(tp[1])))[1]
+    return min(same_day, key=lambda tp: (tp[0], str(tp[1])))[1]
+
+
+def _epoch_day(t: float) -> str:
+    """YYYYMMDD of a stamp epoch (same convention as _stamp_epoch_s)."""
+    return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y%m%d")
+
+
+def sbg_session_days(root: Path) -> set[str]:
+    """Dates (YYYYMMDD) that have a stamped SBG export session under SBGData/."""
+    return {_epoch_day(t) for t, _ in _session_files(root, NAV_EXPORT_NAME)
+            if t is not None}
 
 
 def _find_nav_export(root: Path, run_stamp: str = "") -> Path | None:

@@ -124,6 +124,7 @@ def preflight(root: Path, calibrations_dir: Path | None = None,
     report = PreflightReport(root=str(root))
     report.exif_ok, report.exif_note = ensure_piexif()
     nav_cache: dict = {}
+    sbg_days: dict = {}      # root -> days with an SBG session, found once
     for run in disc.discover_runs(root, calibrations_dir=calibrations_dir,
                                   overrides=overrides, daily_path=daily_path):
         pf = RunPreflight(run_id=run.run_id)
@@ -140,6 +141,16 @@ def preflight(root: Path, calibrations_dir: Path | None = None,
         if pf.missing:
             pf.ready = False
             pf.reason = "missing " + ", ".join(m.key for m in pf.missing)
+            # Say the real reason when the export is missing because the
+            # SBG data for this run's DAY is not in the folder (other days'
+            # sessions are never used - discovery.pick_session_file).
+            if any(m.key == disc.KEY_NAV_EXPORT for m in pf.missing):
+                if run.root not in sbg_days:
+                    sbg_days[run.root] = disc.sbg_session_days(Path(run.root))
+                days = sbg_days[run.root]
+                if days and run.run_id[:8] not in days:
+                    pf.reason = (f"no SBG data for this day ({run.run_id[:8]}) - "
+                                 + pf.reason)
             report.runs.append(pf)
             continue
 

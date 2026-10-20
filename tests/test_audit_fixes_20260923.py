@@ -55,11 +55,23 @@ def test_unstamped_layout_falls_back_to_the_old_behaviour(tmp_path):
     assert disc.pick_session_file(files, "20260821.133437") == a
 
 
-def test_run_before_every_session_falls_back_to_first(tmp_path):
-    first = _export(tmp_path, "20260821.124517_0001")
+def test_a_day_with_no_session_of_its_own_gets_none(tmp_path):
+    """Was: fall back to the first export - another day's. 103_ProcessTest
+    (2026-10-20): every day-14 run got a day-15 session. Never again."""
+    _export(tmp_path, "20260821.124517_0001")
     _export(tmp_path, "20260822.081000_0001")
     files = disc._session_files(tmp_path, "ascii-output.txt")
-    assert disc.pick_session_file(files, "20260820.100000") == first
+    assert disc.pick_session_file(files, "20260820.100000") is None
+    assert disc.pick_session_file(files, "20260823.100000") is None
+    assert disc.sbg_session_days(tmp_path) == {"20260821", "20260822"}
+
+
+def test_run_before_every_session_of_its_day_takes_that_days_first(tmp_path):
+    _export(tmp_path, "20260820.150000_0001")
+    am = _export(tmp_path, "20260821.124517_0001")
+    _export(tmp_path, "20260821.160000_0002")
+    files = disc._session_files(tmp_path, "ascii-output.txt")
+    assert disc.pick_session_file(files, "20260821.100000") == am
 
 
 def test_no_exports_at_all(tmp_path):
@@ -84,6 +96,23 @@ def test_discovery_assigns_per_run(tmp_path):
     assert runs["20260821.133437"].get(disc.KEY_EVENTS_EXPORT) == e1
     assert runs["20260822.093000"].get(disc.KEY_NAV_EXPORT) == n2
     assert runs["20260822.093000"].get(disc.KEY_EVENTS_EXPORT) == e2
+
+
+def test_a_run_without_its_days_sbg_data_is_skipped_and_says_why(tmp_path):
+    """103_ProcessTest, 2026-10-20: day 14 had no SBG data, day 15 did."""
+    from core.batch import preflight
+    cam = tmp_path / "Images" / "20261014.094844" / "Rear"
+    cam.mkdir(parents=True)
+    (cam / "000000000750.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    _export(tmp_path, "20261015.075722_0001")
+    _export(tmp_path, "20261015.075722_0001", "Events-output.txt")
+    run = disc.discover_runs(tmp_path, calibrations_dir=tmp_path,
+                             registered_only=False)[0]
+    assert run.get(disc.KEY_NAV_EXPORT) is None
+    assert run.get(disc.KEY_EVENTS_EXPORT) is None
+    pf = preflight(tmp_path, calibrations_dir=tmp_path).runs[0]
+    assert not pf.ready
+    assert pf.reason.startswith("no SBG data for this day (20261014)")
 
 
 # --- 2 + 3. exit code and the stderr reason line ----------------------------
