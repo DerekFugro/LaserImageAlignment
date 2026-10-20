@@ -308,20 +308,40 @@ def rename_camera_folder(folder: Path, files: list[str], distance_mm,
 
     # A target is safe if nothing holds it, or the file holding it is itself
     # moving away in this same plan (the temp-name pass makes that work).
-    moving = {src for src, _ in plan}
-    taken: set[str] = set()
+    #
+    # "Moving away" has to mean it REALLY moves. A file held back by a
+    # collision stays on its old name, so that name is not free after all,
+    # and a file planned onto it would find it taken mid-rename and be put
+    # back too - safe, but reported as "appeared during the rename" and for
+    # the wrong reason. So repeat until nothing new is held back: each pass
+    # can only hold back more files, so this stops (Derek, 2026-10-20).
+    stay: dict[str, str] = {}                           # src -> why it stays
+    while True:
+        moving = {src for src, _ in plan if src not in stay}
+        taken: set[str] = set()
+        changed = False
+        for src, dst in plan:
+            if src in stay:
+                continue
+            if dst in taken:
+                stay[src] = f"{src}: two images both want {dst}"
+                changed = True
+            elif (folder / dst).exists() and dst not in moving:
+                stay[src] = (f"{src}: {dst} is still held by an image that could "
+                             "not be renamed" if dst in stay else
+                             f"{src}: {dst} is already taken by another file")
+                changed = True
+            else:
+                taken.add(dst)
+        if not changed:
+            break
     safe: list[tuple[str, str]] = []
     for src, dst in plan:
-        if dst in taken:
-            out.errors.append(f"{src}: two images both want {dst}")
+        if src in stay:
+            out.errors.append(stay[src])
             out.skipped += 1
             out.final_names[index_of[src]] = src        # it stays where it is
-        elif (folder / dst).exists() and dst not in moving:
-            out.errors.append(f"{src}: {dst} is already taken by another file")
-            out.skipped += 1
-            out.final_names[index_of[src]] = src
         else:
-            taken.add(dst)
             safe.append((src, dst))
     dropped = {origin.get(s, s) for s, _ in plan} - {origin.get(s, s) for s, _ in safe}
     rows = [r if r[0] not in dropped else

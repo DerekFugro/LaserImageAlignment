@@ -266,6 +266,26 @@ def test_two_images_wanting_one_name_is_an_error_not_a_loss(tmp_path):
     assert len(list(d.glob("*.jpg"))) == 2            # nothing vanished
 
 
+def test_a_held_back_name_is_not_handed_to_another_image(tmp_path):
+    """A and B both want 500, so B stays on 1500. C wants 1500 - which B
+    still holds. C must be held back up front with the real reason, not
+    discovered mid-rename as "appeared during the rename"."""
+    C = "000000002250.jpg"
+    d = _folder_with(tmp_path, [A, B, C])
+    out = rename_camera_folder(d, [A, B, C], np.array([500.0, 500.0, 1500.0]),
+                               ENTRY, ENTRY.run_id, "Rear")
+    assert out.renamed == 1 and out.skipped == 2
+    assert sorted(p.name for p in d.glob("*.jpg")) == ["000000000500.jpg", B, C]
+    assert out.final_names == ["000000000500.jpg", B, C]
+    assert any("still held" in e for e in out.errors)
+    assert not any("appeared during" in e for e in out.errors)
+    with open(d / MANIFEST_NAME, newline="") as fh:
+        notes = {r["original_name"]: r["note"] for r in csv.DictReader(fh)}
+    assert "collision" in notes[B] and "collision" in notes[C]
+    undone, problems = undo_renames(d)
+    assert not problems and sorted(p.name for p in d.glob("*.jpg")) == [A, B, C]
+
+
 def test_dry_run_touches_nothing(tmp_path):
     d = _folder_with(tmp_path, [A])
     out = rename_camera_folder(d, [A], np.array([749.0]), ENTRY,
