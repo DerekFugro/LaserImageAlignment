@@ -34,6 +34,9 @@ PTP_PASS_MAX_DEV_S = 0.5
 # run 20260824.101724's right laser from r = 0.958 to r = 0.746 and failed it.
 PTP_MAX_INTERVAL_RATIO = 2.0
 PTP_MIN_SPEED_MS = 0.05       # below this the expected interval is meaningless
+# fewer profiles than this and there is nothing to fit (20261015.165518: the
+# lasers recorded 1 and 3 profiles over a 495 m run)
+PTP_MIN_PROFILES = 10
 
 # §B trigger spacing
 TRIGGER_SPACING_M = 0.75
@@ -177,7 +180,7 @@ def _solve_once(gocator: GocatorIndex, ruler: "NavTable | DmiTable",
     enc = gocator.encoder.astype(np.float64)
     if keep is not None:
         ptp_s, enc = ptp_s[keep], enc[keep]
-    if len(ptp_s) < 10:
+    if len(ptp_s) < PTP_MIN_PROFILES:
         return PtpOffsetResult(
             offset_s=TAI_UTC_NOMINAL_S, r=0.0, passed=False, n_used=len(ptp_s),
             sweep_offsets=np.empty(0), sweep_r=np.empty(0),

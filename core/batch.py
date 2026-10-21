@@ -17,7 +17,7 @@ import numpy as np
 from . import calibration as cal
 from . import discovery as disc
 from .atomic import atomic_open, atomic_write_text
-from .alignment import PTP_PASS_MAX_DEV_S, scan_ground_positions
+from .alignment import PTP_MIN_PROFILES, PTP_PASS_MAX_DEV_S, scan_ground_positions
 from .formats import GOCATOR_META_COLS, TAI_UTC_NOMINAL_S
 from .geotag import clear_gps, ensure_piexif, geotag_image, inject_gocator_gps
 from .pipeline import RunResult, export_csv, process_run
@@ -498,9 +498,13 @@ class BatchReport:
             if o.result is not None and o.result.ptp_l is not None:
                 p = o.result.ptp_l
                 m = o.result.match
+                # an almost empty laser file has no fit; printing "fit 37.000
+                # (r=0.000)" read like a timing fault (20261015.165518)
+                no_fit = int(getattr(p, "n_used", PTP_MIN_PROFILES)) < PTP_MIN_PROFILES
                 lines.append(f"         PTP offset {p.offset_s:.3f} s fixed"
-                         + (f", fit {p.fitted_offset_s:.3f}" if getattr(p, "fitted_offset_s", None) is not None else "")
-                         + f" (r={p.r:.3f})"
+                         + (", no laser data to check it" if no_fit else
+                            (f", fit {p.fitted_offset_s:.3f}" if getattr(p, "fitted_offset_s", None) is not None else "")
+                            + f" (r={p.r:.3f})")
                              + (" | " + match_summary(o.result.report, m,
                                                       len(o.result.parsed.images or []))
                                 if m else ""))

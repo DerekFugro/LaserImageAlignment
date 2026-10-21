@@ -14,7 +14,8 @@ import numpy as np
 
 from . import discovery as disc
 from .alignment import (
-    PtpOffsetResult, TriggerData, TRIGGER_SPACING_M, gocator_distances,
+    PTP_MIN_PROFILES, PtpOffsetResult, TriggerData,
+    TRIGGER_SPACING_M, gocator_distances,
 )
 from .formats import (
     DmiTable, GocatorIndex, ImageSet, NavTable, ParseError, UtcTable,
@@ -650,6 +651,19 @@ def merge_shared_dmi(report: QCReport) -> None:
     report.checks.append(merged)
 
 
+def _encoder_step(*gocs) -> float | None:
+    """Median encoder tics between consecutive profiles, from the first of
+    these laser files that has two or more; None when none does."""
+    for g in gocs:
+        if g is None or len(g) < 2:
+            continue
+        d = np.diff(np.asarray(g.encoder, dtype=np.float64))
+        d = d[d > 0]
+        if len(d):
+            return float(np.median(d))
+    return None
+
+
 def pairing_offsets(report: QCReport) -> dict:
     """camera -> k (photo n <- trigger n+k) from the pipeline's
     align.camera.<cam>.pairing rows; empty when the pairing was not run."""
@@ -1123,11 +1137,44 @@ def check_content(pr: ParsedRun, report: QCReport,
                    f"median valid-point ratio {valid_ratio * 100:.0f}% (limit 50%)",
                    valid_ratio=valid_ratio)
         if ptp is not None:
+            msg, pct_missing = ptp.message, None
+            # An almost empty laser file is a DATA loss, not a timing fault:
+            # say how much is missing, in percent (Derek, 2026-10-21, on
+            # 20261015.165518: 1 and 3 profiles over a 495 m run, reported as
+            # "the fit found 37.000 s ... NOT verified").
+            if (int(getattr(ptp, "n_used", PTP_MIN_PROFILES)) < PTP_MIN_PROFILES
+                    and triggers is not None and len(triggers.dist_m) > 1):
+                travel_m = (float(triggers.dist_m[-1] - triggers.dist_m[0])
+                            + TRIGGER_SPACING_M)
+                # The profile spacing is MEASURED from the encoder in the files
+                # themselves (this laser, else the other one): the "102 tics"
+                # of the old cart is 136 on the new van (165518 R: 123648344,
+                # 123648480, 123648616 - 23.5 mm, as on the day's other runs).
+                ticks = _encoder_step(goc, pr.gocator_l, pr.gocator_r)
+                step_m = (ticks / counts_per_m
+                          if (ticks and counts_per_m) else None)
+                expected = travel_m / step_m if step_m else 0.0
+                msg = (f"laser {side} recorded only {len(goc)} profile(s) for a "
+                       f"{travel_m:.0f} m run - no laser data to write (percent "
+                       "missing unknown: "
+                       + ("no ACS DMI calibration for this day" if not counts_per_m
+                          else "too few profiles to measure their spacing")
+                       + "). The photos do not use the lasers and are not affected")
+                if expected > 0:
+                    # floored, so 1 profile of 21,090 reads 99.99%, not 100.0%
+                    pct_missing = max(0.0, np.floor(
+                        10000.0 * (1.0 - len(goc) / expected)) / 100.0)
+                    msg = (f"laser {side} recorded {len(goc)} profile(s) for a "
+                           f"{travel_m:.0f} m run - {pct_missing:.2f}% of its data is "
+                           f"missing (about {expected:,.0f} expected, one every "
+                           f"{step_m * 1000:.2f} mm). Its CSV gets no GPS; the photos "
+                           "do not use the lasers and are not affected")
             report.add(
                 f"content.gocator_{side}_ptp", f"Gocator {side} PTP offset",
-                Severity.PASS if ptp.passed else Severity.FAIL, ptp.message,
+                Severity.PASS if ptp.passed else Severity.FAIL, msg,
                 # only this sensor's own GPS columns depend on this solve
                 blocks=(f"gocator_{side}",),
+                impact_pct=pct_missing,
                 offset_s=ptp.offset_s, r=ptp.r,
                 fitted_offset_s=getattr(ptp, "fitted_offset_s", None),
             )
