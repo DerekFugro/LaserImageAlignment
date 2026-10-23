@@ -395,9 +395,9 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
     # placed by trigger time and need neither laser's profiles; until
     # 2026-09-24 this FAIL was unscoped, so one bad right-laser CSV
     # (20260816.122732: ptpTimestamp not strictly increasing) cost the run
-    # every image, the table and the good left laser too. The images still
-    # need a PTP solve from the OTHER laser to exist - if neither parses,
-    # alignment does not run and the run is flagged as before.
+    # every image, the table and the good left laser too. If neither laser
+    # parses, the photos are still placed (pipeline.process_run uses the
+    # nominal PTP offset for the table's PTP columns) - 2026-10-23.
     pr.gocator_l = attempt("format.gocator_l", "Gocator L CSV", disc.KEY_GOCATOR_L,
                            GocatorIndex.build, blocks=(TARGET_GOCATOR_L,))
     pr.gocator_r = attempt("format.gocator_r", "Gocator R CSV", disc.KEY_GOCATOR_R,

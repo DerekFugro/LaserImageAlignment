@@ -129,6 +129,20 @@ def process_run(run: disc.RunPaths) -> RunResult:
     # final alignment. Prefer a solver result that PASSED — a failed L offset
     # must not be used just because L was parsed first.
     ptp = _best_ptp(result.ptp_l, result.ptp_r)
+    # Photos are placed by trigger time and need no laser. When neither
+    # laser file holds a single profile (20261016.172652: both "no profile
+    # rows") there is no PTP result at all, and until 2026-10-23 that stopped
+    # the alignment - 92 good photos got no GPS while a run with 1 and 3
+    # profiles (20261015.165518) had its photos written. Derek: photos alone
+    # are a deliverable; process what is good and report the rest. The PTP
+    # columns of the alignment table are then the nominal offset, unverified.
+    if ptp is None and result.triggers is not None and parsed.cameras:
+        from .formats import TAI_UTC_NOMINAL_S
+        ptp = PtpOffsetResult(
+            offset_s=TAI_UTC_NOMINAL_S, r=0.0, passed=False, n_used=0,
+            sweep_offsets=np.empty(0), sweep_r=np.empty(0),
+            message="no laser data - photos placed by trigger time; PTP columns "
+                    "nominal, not verified")
     # every discovered camera gets its own match + alignment (same triggers,
     # matched independently so a camera with a different image count is safe)
     if result.triggers is not None and ptp is not None and parsed.cameras:

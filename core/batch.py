@@ -1310,9 +1310,14 @@ def _process_one(run: disc.RunPaths, write_images: bool, write_gocator: bool,
     if write_gocator and nav is not None:
         for side, goc, ptp in (("L", result.parsed.gocator_l, result.ptp_l),
                                ("R", result.parsed.gocator_r, result.ptp_r)):
-            if goc is None:
-                continue
             target = f"gocator_{side}"
+            if goc is None:
+                # a laser file that would not parse (e.g. "no profile rows")
+                # is HELD, not quietly skipped - otherwise a run whose photos
+                # were written but whose lasers were empty came out "written"
+                if target in blocked:
+                    out.held[target] = why(target)
+                continue
             if target in blocked or ptp is None or not ptp.passed:
                 # named, not silently skipped — this is the sensor the operator
                 # has to go and look at
