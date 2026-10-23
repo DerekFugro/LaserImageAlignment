@@ -24,6 +24,10 @@ from .pipeline import RunResult, export_csv, process_run
 from .qc import TARGET_CSV, TARGET_IMAGES, TARGETS, match_summary
 from .version import app_version
 
+# how a deliverable is named in a run_mapping.csv note
+_TARGET_WORDS = {"images": "images", "csv": "alignment table",
+                 "gocator_L": "laser L", "gocator_R": "laser R"}
+
 
 @dataclass
 class MissingInput:
@@ -697,6 +701,27 @@ def write_run_mapping_csv(report: "BatchReport", out_path: Path) -> Path:
         v = run.get(key) if run is not None else None
         return str(v) if v else ""
 
+    def _mapping_reason(o) -> str:
+        """One line: what happened to a run that was not plainly written."""
+        def one_line(text: str, limit: int = 220) -> str:
+            text = " ".join(str(text).split())
+            return text if len(text) <= limit else text[:limit - 3] + "..."
+        if o.status == "skipped":
+            return "cannot run - " + one_line("; ".join(o.failures[:1]))
+        if o.status == "partial":
+            written = [_TARGET_WORDS.get(t, t)
+                       for t in TARGETS if t not in o.held]
+            held = [_TARGET_WORDS.get(t, t) for t in TARGETS if t in o.held]
+            first = next((o.held[t] for t in TARGETS if t in o.held), "")
+            return one_line(
+                (" and ".join(written) or "nothing") + " written; held: "
+                + ", ".join(held) + (f" - {first}" if first else ""))
+        if o.status in ("flagged", "error"):
+            first = (o.failures[0] if o.failures else
+                     next((o.held[t] for t in TARGETS if t in o.held), ""))
+            return one_line(first or "something failed", 200) + " - see issues_*.csv"
+        return ""
+
     def logger_dir(run) -> str:
         """The DataLogger FOLDER, which is the thing somebody has to go and
         find when its name is a second or two off. The individual file paths
@@ -720,14 +745,17 @@ def write_run_mapping_csv(report: "BatchReport", out_path: Path) -> Path:
             # rather than a blank it has to interpret
             stamp = (getattr(run, "sbg_stamp", "") or o.run_id) if run else o.run_id
             skew = int(getattr(run, "sbg_skew_s", 0) or 0) if run else 0
+            # The reason comes FIRST: the orchestrator's review log quotes
+            # this note for every run that was not plainly written, and
+            # "ran but something failed - see issues_*.csv" or a blank told
+            # the reader nothing (2026-10-23).
             notes = []
+            reason = _mapping_reason(o)
+            if reason:
+                notes.append(reason)
             if skew:
                 notes.append(f"logger folder is {skew:+d} s from the run stamp: "
                              f"'{stamp} DataLogger'")
-            if o.status == "skipped":
-                notes.append("cannot run - " + "; ".join(o.failures[:1]))
-            elif o.status in ("flagged", "error"):
-                notes.append("ran but something failed - see issues_*.csv")
             if e is None:
                 notes.append("no row in the ACS Daily file")
             w.writerow({
