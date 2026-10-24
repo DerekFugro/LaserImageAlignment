@@ -67,6 +67,40 @@ MATCH_MAX_RESIDUAL_M = 0.375
 # trigger time + delay (pipeline.py). A camera without one keeps "head".
 PAIRING_MODE = "head"
 
+# A trigger that comes too soon after the last one the camera photographed
+# gets NO photo (Derek, 2026-10-24). 20261017.154422: the SBG sent its first
+# two pulses 0.111 s apart (0.16 m - an odd first pulse at the start of the
+# run; the cause is in the SBG, not known). The camera made one picture for
+# the two, so counting photos against triggers put every photo from the third
+# on one trigger early - 0.75 m behind where it was taken. Proven by the photo
+# overlap: photos 2->3 moved ~0.95 m, not 0.16 m.
+# The value is MEASURED, not a camera setting: the camera missed a pulse
+# 0.111 s after the one before and took one 0.145 s after (20261014.173812,
+# photos even ~950 px apart around it). Of 49,436 pulse gaps in 202 runs
+# (Oct 9-17) only 154422's is under 0.13 s, so normal collection is untouched.
+# Applies to cameras with a trigger delay in the lever-arm file.
+CAMERA_MIN_TRIGGER_GAP_S = 0.13
+
+
+def camera_trigger_indices(utc_s, min_gap_s: float = CAMERA_MIN_TRIGGER_GAP_S
+                           ) -> tuple[np.ndarray, list]:
+    """The triggers a camera can photograph, in order, and the ones it cannot.
+
+    Returns (indices of the usable triggers, [(skipped index, gap to the last
+    usable one in s), ...]). The gap is measured from the last trigger that DID
+    get a photo, since that is the picture the camera is still busy with."""
+    t = np.asarray(utc_s, dtype=np.float64)
+    keep, skipped = [], []
+    last = None
+    for i, ti in enumerate(t):
+        if last is not None and np.isfinite(ti) and np.isfinite(last) \
+                and ti - last < min_gap_s:
+            skipped.append((i, float(ti - last)))
+            continue
+        keep.append(i)
+        last = ti
+    return np.asarray(keep, dtype=np.int64), skipped
+
 
 @dataclass
 class PtpOffsetResult:
@@ -302,10 +336,15 @@ class MatchResult:
 
 def match_images_to_triggers(images: ImageSet, triggers: TriggerData,
                              mode: str | None = None,
-                             photo_lag: int = 0) -> MatchResult:
+                             photo_lag: int = 0,
+                             usable: np.ndarray | None = None) -> MatchResult:
     """Ordinal matching. mode "head" (the default, see PAIRING_MODE): photo n
     <-> logged trigger n - photo_lag. mode "tail" (the old rule, described
     below): trigger i <-> image i + k with k = n_images - n_triggers.
+
+    `usable` (head mode): the triggers the camera could photograph, from
+    camera_trigger_indices. Photos are counted along THAT list, so a trigger
+    that came too soon for the camera is passed over. None = every trigger.
 
     photo_lag = 1 for a camera with a trigger delay in the lever-arm file
     (Derek, 2026-10-11): its photo n is the picture taken `delay` after
@@ -391,7 +430,13 @@ def match_images_to_triggers(images: ImageSet, triggers: TriggerData,
         ordinal = np.rint(np.asarray(images.counter_mm, dtype=np.float64)
                           / (TRIGGER_SPACING_M * 1000.0)).astype(np.int64)
         idx = ordinal - 1 - int(photo_lag) + int(getattr(triggers, "n_prepended", 0) or 0)
-        trigger_for_image = np.where((idx >= 0) & (idx < n_trg), idx, -1).astype(np.int64)
+        if usable is None:
+            trigger_for_image = np.where((idx >= 0) & (idx < n_trg), idx, -1).astype(np.int64)
+        else:
+            usable = np.asarray(usable, dtype=np.int64)
+            ok = (idx >= 0) & (idx < len(usable))
+            trigger_for_image = np.full(n_img, -1, dtype=np.int64)
+            trigger_for_image[ok] = usable[idx[ok]]
     else:
         n_aside = int(getattr(images, "n_set_aside", 0) or 0)
         first_free = max(0, -unexplained) + n_aside

@@ -88,13 +88,16 @@ def process_run(run: disc.RunPaths) -> RunResult:
     # which trigger took photo n, per camera (camera log first - see
     # core/cameralog.py). photo_lag = -k for photo n <- trigger n+k.
     lags: dict = {}
+    usable = None
     if result.triggers is not None:
-        lags = _pairing(run, parsed, result.triggers, report)
+        usable = _camera_usable_triggers(parsed, result.triggers, report)
+        lags = _pairing(run, parsed, result.triggers, report, usable)
     if parsed.images is not None and result.triggers is not None:
         primary = _camera_name_of(parsed, parsed.images)
         result.match = match_images_to_triggers(
             parsed.images, result.triggers,
-            photo_lag=lags.get(primary, _photo_lag(parsed, primary)))
+            photo_lag=lags.get(primary, _photo_lag(parsed, primary)),
+            usable=_usable_for(parsed, primary, usable))
         report.add(
             "align.match", "Image-trigger match",
             Severity.PASS if result.match.n_matched else Severity.FAIL,
@@ -150,7 +153,8 @@ def process_run(run: disc.RunPaths) -> RunResult:
             delay = cal.trigger_delay_s(parsed.lever_arms, cam_name)
             cam_match = match_images_to_triggers(
                 cam_images, result.triggers,
-                photo_lag=lags.get(cam_name, _photo_lag(parsed, cam_name)))
+                photo_lag=lags.get(cam_name, _photo_lag(parsed, cam_name)),
+                usable=_usable_for(parsed, cam_name, usable))
             result.camera_matches[cam_name] = cam_match
             # The whole (X, Y, Z) from the lever-arm file - the one parsed
             # for THIS run (parsed.lever_arms, from run.paths), not a
@@ -235,12 +239,49 @@ def _photo_lag(parsed, cam_name) -> int:
     return 1 if cal.trigger_delay_s(parsed.lever_arms, cam_name) is not None else 0
 
 
-def _pairing(run, parsed, triggers, report) -> dict:
+def _camera_usable_triggers(parsed, triggers, report):
+    """The triggers a camera with a trigger delay can photograph (see
+    alignment.CAMERA_MIN_TRIGGER_GAP_S), or None when no camera has a delay.
+    A report row only when a trigger is passed over - WARN, so it gets a look:
+    it has happened once (20261017.154422) and the cause is in the SBG."""
+    from .alignment import CAMERA_MIN_TRIGGER_GAP_S, camera_trigger_indices
+    if not any(cal.trigger_delay_s(parsed.lever_arms, c) is not None
+               for c in (parsed.cameras or {})):
+        return None
+    usable, skipped = camera_trigger_indices(triggers.utc_s)
+    if skipped:
+        shown = ", ".join(f"trigger {i + 1} ({gap:.3f} s after trigger {i})"
+                          for i, gap in skipped[:5])
+        more = f" and {len(skipped) - 5} more" if len(skipped) > 5 else ""
+        report.add(
+            "align.trigger_too_soon", "Trigger too soon for the camera",
+            Severity.WARN,
+            f"{len(skipped)} trigger(s) came less than "
+            f"{CAMERA_MIN_TRIGGER_GAP_S:.2f} s after the one before, too soon for "
+            f"the camera to take a picture: {shown}{more}. They got no photo, so "
+            "the photos after them are counted from the next trigger",
+            skipped=[int(i) for i, _ in skipped],
+            gaps_s=[round(g, 4) for _, g in skipped])
+    return usable
+
+
+def _usable_for(parsed, cam_name, usable):
+    """`usable` for a camera with a trigger delay, else None (every trigger)."""
+    if usable is None or cal.trigger_delay_s(parsed.lever_arms, cam_name) is None:
+        return None
+    return usable
+
+
+def _pairing(run, parsed, triggers, report, usable=None) -> dict:
     """photo_lag per camera that has a trigger delay, decided in Derek's order
     (2026-10-20): camera log frame times, then the camera start, then photo n
     = trigger n-1 assumed. Cameras without a delay keep the old rule (lag 0).
     One report row per camera; the run is written in every case, but anything
-    not confirmed is a WARN so it gets a look."""
+    not confirmed is a WARN so it gets a look.
+
+    `usable`: the triggers the camera could photograph. The camera log and
+    the photo count are judged against those, so a trigger that came too soon
+    does not throw the offset or the count off."""
     from . import cameralog
     log_path = run.get(disc.KEY_CAMERA_LOG)
     lags = {}
@@ -249,7 +290,8 @@ def _pairing(run, parsed, triggers, report) -> dict:
         if delay is None:
             continue
         n_photos = len(cam_images) + int(getattr(cam_images, "n_set_aside", 0) or 0)
-        r = cameralog.decide(log_path, run.run_id, cam_name, triggers.utc_s,
+        trig_utc = triggers.utc_s if usable is None else np.asarray(triggers.utc_s)[usable]
+        r = cameralog.decide(log_path, run.run_id, cam_name, trig_utc,
                              delay, n_photos)
         lags[cam_name] = -int(r.k)
         ok = r.confident and "COUNT DOES NOT FIT" not in r.message
