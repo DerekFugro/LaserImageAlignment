@@ -509,13 +509,22 @@ class GocatorIndex:
     n_valid: np.ndarray        # int32
     byte_offset: np.ndarray    # int64 offset of each data row in the file
     meta_cols: int = GOCATOR_META_COLS  # columns before x0 (grows once GPS is injected)
-    # set when one PTP clock step was corrected on load - see _repair_ptp_step
+    # set when PTP clock steps were corrected on load - see _align_ptp_to_sensor
+    # and _repair_ptp_step
     ptp_step: dict | None = None
+    # set when PTP steps were SEEN but could not be corrected safely (the
+    # file still reads; QC warns) - see _align_ptp_to_sensor
+    ptp_suspect: dict | None = None
+    # the sensor's own free-running clock (the `timestamp` column). Never
+    # used to place anything by itself; it only shows where the PTP time
+    # stepped (see _align_ptp_to_sensor). None when not usable.
+    sensor_ts: np.ndarray | None = None
 
     @classmethod
     def build(cls, path: Path) -> "GocatorIndex":
         path = Path(path)
         frames, ptps, encs, npts, nval, offs = [], [], [], [], [], []
+        sts: list | None = []
         try:
             fh = open(path, "rb")
         except OSError as exc:
@@ -552,6 +561,11 @@ class GocatorIndex:
                     nval.append(int(parts[5]))
                 except ValueError as exc:
                     raise ParseError(path, f"non-numeric metadata: {exc}", line_no)
+                if sts is not None:
+                    try:
+                        sts.append(int(parts[1]))
+                    except ValueError:
+                        sts = None          # not usable; nothing depends on it
                 offs.append(off)
         if not frames:
             raise ParseError(path, "no profile rows")
@@ -564,11 +578,28 @@ class GocatorIndex:
             n_valid=np.asarray(nval, dtype=np.int32),
             byte_offset=np.asarray(offs, dtype=np.int64),
             meta_cols=meta_cols,
+            sensor_ts=(np.asarray(sts, dtype=np.int64)
+                       if sts is not None and len(sts) == len(frames) else None),
         )
+        # Every file is checked against its own sensor clock; a file with no
+        # PTP step comes out exactly as read.
+        sensor_status = _align_ptp_to_sensor(idx)
         if len(idx.ptp_us) >= 2 and not np.all(np.diff(idx.ptp_us) > 0):
-            idx.ptp_step = _repair_ptp_step(idx)
-            if idx.ptp_step is None:
-                raise ParseError(path, "ptpTimestamp not strictly increasing")
+            # Whenever the sensor-clock repair did not fix it, the older
+            # one-step repair runs exactly as before, so no file is ever
+            # refused that loaded before this change (a 'suspect' file
+            # still carries its warning).
+            if sensor_status != "corrected" and idx.ptp_step is None:
+                idx.ptp_step = _repair_ptp_step(idx)
+            if idx.ptp_step is None or not np.all(np.diff(idx.ptp_us) > 0):
+                d = np.diff(idx.ptp_us)
+                back = np.where(d <= 0)[0]
+                raise ParseError(
+                    path,
+                    f"ptpTimestamp not strictly increasing: {len(back)} backward "
+                    f"step(s), first at frame {int(idx.frame[back[0] + 1])} "
+                    f"({int(d[back[0]]) / 1000:+.1f} ms) - the PTP time could not "
+                    "be put back on one clock")
         return idx
 
     def __len__(self) -> int:
@@ -645,6 +676,128 @@ def _repair_ptp_step(idx: "GocatorIndex") -> dict | None:
     idx.ptp_us = fixed
     return {"frame": int(idx.frame[i]), "row": i, "jump_us": jump,
             "moved_rows": moved, "side": side, "n_rows": len(ptp)}
+
+
+# The sensor-clock repair (Derek, 2026-10-24).
+#
+# Each Gocator row carries two clocks: ptpTimestamp (PTP, what places the
+# profile) and `timestamp`, the sensor's own free-running clock, which never
+# sees PTP. Lined up, the two differ by a slow drift and nothing else - the
+# clean left laser of 20261016.124201 holds within 0.1 ms over 14,054 rows.
+# While the laser locks onto PTP at the start of a run its PTP time can step,
+# and on every file seen it stepped in a +X, +2X, -X pattern:
+#
+#   20261016.124201 R  +62 ms row 7, +124 ms row 13, -62 ms row 33
+#   20261014.173643 R  +20 ms row 21, +40 ms row 45, -20 ms row 94
+#   20261007.120330 L  +14 ms row 89, +28 ms row 91, -14 ms row 149
+#
+# The older repair (_repair_ptp_step) sees only the one BACKWARD step and
+# moved every row before it by that one amount, so the rows before the
+# forward steps stayed 2-3 steps off (124201 R rows 0-12: 124-187 ms). And a
+# file whose clock only stepped FORWARD was never caught at all.
+#
+# So every file is lined up against its own sensor clock. Where the PTP time
+# sits off the steady part by more than PTP_SENSOR_JUMP_US, that stretch is
+# moved back onto it. Only when it is unmistakably the PTP clock: the sensor
+# clock and frameIndex run on unbroken across every step, the encoder takes
+# an ordinary step there, the moved stretches lie at the START or END of the
+# run and together hold at most PTP_SENSOR_MAX_MOVED_FRAC of it, and no step
+# is bigger than PTP_SENSOR_MAX_JUMP_US. Otherwise nothing is moved: a file
+# whose PTP time still runs forward is kept with a warning (ptp_suspect), one
+# that does not is refused as before.
+PTP_SENSOR_JUMP_US = 5_000          # the clean files wander < 2 ms end to end
+PTP_SENSOR_MAX_JUMP_US = 250_000
+# the unsteady start is a few seconds, so on a short run it is a bigger
+# share: 11-16% on eight short runs of 20261005-09 (499-4507 profiles)
+PTP_SENSOR_MAX_MOVED_FRAC = 0.25
+
+
+def _sensor_residual(ptp: np.ndarray, ts: np.ndarray, rows: np.ndarray) -> np.ndarray:
+    """PTP minus the sensor clock mapped onto PTP by a straight line fitted
+    on `rows`, in microseconds."""
+    a, b = np.polyfit(ts[rows].astype(np.float64), ptp[rows].astype(np.float64), 1)
+    return ptp.astype(np.float64) - (a * ts.astype(np.float64) + b)
+
+
+def _segments(res: np.ndarray) -> list[tuple[int, int]]:
+    """[start, end) runs of rows between residual jumps."""
+    cuts = (np.where(np.abs(np.diff(res)) > PTP_SENSOR_JUMP_US)[0] + 1).tolist()
+    bounds = [0] + cuts + [len(res)]
+    return [(bounds[k], bounds[k + 1]) for k in range(len(bounds) - 1)]
+
+
+def _align_ptp_to_sensor(idx: "GocatorIndex") -> str:
+    """'unusable' (no sensor clock to judge by), 'clean' (no PTP step),
+    'corrected' (steps moved back; idx.ptp_step says what) or 'suspect'
+    (steps seen but not safe to move; idx.ptp_suspect says why)."""
+    ts, ptp = idx.sensor_ts, idx.ptp_us
+    n = len(ptp)
+    if ts is None or n < 50 or len(ts) != n or not np.all(np.diff(ts) > 0):
+        return "unusable"
+    # pass 1 on a rate from every interval, pass 2 refitted on the main run
+    dptp, dts = np.diff(ptp).astype(np.float64), np.diff(ts).astype(np.float64)
+    ok = dptp > 0
+    if int(ok.sum()) < 10:
+        return "unusable"
+    rate = float(np.median(dptp[ok] / dts[ok]))
+    res = ptp - ts.astype(np.float64) * rate
+    res = res - np.median(res)
+    segs = _segments(res)
+    main = max(segs, key=lambda s: s[1] - s[0])
+    res = _sensor_residual(ptp, ts, np.arange(main[0], main[1]))
+    segs = _segments(res)
+    if len(segs) == 1:
+        return "clean"
+    main = max(segs, key=lambda s: s[1] - s[0])
+
+    def suspect(why: str) -> str:
+        idx.ptp_suspect = {"why": why, "steps": len(segs) - 1,
+                           "first_frame": int(idx.frame[segs[1][0]]),
+                           "n_rows": n}
+        return "suspect"
+
+    others = [s for s in segs if s != main]
+    moved = sum(e - s for s, e in others)
+    if moved > PTP_SENSOR_MAX_MOVED_FRAC * n:
+        return suspect(f"PTP steps cover {moved} of {n} profiles - too many to move")
+    # frames, sensor clock and encoder must run on unbroken at every step
+    de = np.diff(idx.encoder)
+    notch = float(np.median(de[de > 0])) if np.any(de > 0) else 0.0
+    jumps = []
+    for s, e in segs[1:]:
+        k = s                                  # first row after the step
+        if int(idx.frame[k] - idx.frame[k - 1]) != 1:
+            return suspect(f"frames missing at the PTP step at frame {int(idx.frame[k])}")
+        # the spacing AROUND the step: it follows speed, and the cart is
+        # slow at the start, so a run-wide median misjudges it
+        near = np.delete(dts[max(k - 11, 0):k + 10], min(k - 1, 10))
+        sdt = float(np.median(near)) if len(near) else float(np.median(dts))
+        if not (0.5 * sdt <= float(ts[k] - ts[k - 1]) <= 1.5 * sdt):
+            return suspect(f"the sensor clock also jumped at frame {int(idx.frame[k])}")
+        step_enc = float(idx.encoder[k] - idx.encoder[k - 1])
+        if notch <= 0 or not (0.5 * notch <= step_enc <= 1.5 * notch):
+            return suspect(f"the encoder jumped at the PTP step at frame {int(idx.frame[k])}")
+        jumps.append((int(idx.frame[k]), k, float(res[k] - res[k - 1])))
+    offsets = [float(np.median(res[s:e])) - float(np.median(res[main[0]:main[1]]))
+               for s, e in others]
+    if max(abs(o) for o in offsets) > PTP_SENSOR_MAX_JUMP_US:
+        return suspect("a PTP step is bigger than "
+                       f"{PTP_SENSOR_MAX_JUMP_US / 1000:.0f} ms")
+    fixed = ptp.copy()
+    for (s, e), off in zip(others, offsets):
+        fixed[s:e] = ptp[s:e] - int(round(off))
+    if not np.all(np.diff(fixed) > 0):
+        return suspect("the PTP time still does not run forward once moved")
+    idx.ptp_us = fixed
+    idx.ptp_step = {
+        "method": "sensor clock", "n_rows": n, "moved_rows": moved,
+        "frame": jumps[0][0], "row": jumps[0][1],
+        "steps_ms": [round(j / 1000.0, 1) for _, _, j in jumps],
+        "step_frames": [f for f, _, _ in jumps],
+        "max_shift_ms": round(max(abs(o) for o in offsets) / 1000.0, 1),
+        "side": "before" if others[0][0] == 0 else "after",
+    }
+    return "corrected"
 
 
 # ---------------------------------------------------------------------------

@@ -404,7 +404,32 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
                            GocatorIndex.build, blocks=(TARGET_GOCATOR_R,))
     for side, goc in (("L", pr.gocator_l), ("R", pr.gocator_r)):
         step = getattr(goc, "ptp_step", None) if goc is not None else None
-        if step:
+        suspect = getattr(goc, "ptp_suspect", None) if goc is not None else None
+        if suspect:
+            report.add(
+                f"format.gocator_{side.lower()}_ptp_step", f"Gocator {side} PTP clock step",
+                Severity.WARN,
+                f"the laser's PTP time stepped {suspect['steps']} time(s) against its "
+                f"own sensor clock (first at frame {suspect['first_frame']}) but was "
+                f"NOT corrected: {suspect['why']}. Profile positions near those "
+                "frames may be off - check this laser",
+                frame=suspect["first_frame"])
+        if step and step.get("method") == "sensor clock":
+            report.add(
+                f"format.gocator_{side.lower()}_ptp_step", f"Gocator {side} PTP clock step",
+                Severity.WARN,
+                f"{step['moved_rows']} of {step['n_rows']} profiles moved back onto the "
+                f"steady clock (up to {step['max_shift_ms']:.1f} ms, ~"
+                f"{step['max_shift_ms']:.0f} mm at 1 m/s) - the laser's PTP time stepped "
+                f"{', '.join(f'{s:+.1f} ms' for s in step['steps_ms'])} at frames "
+                f"{', '.join(str(f) for f in step['step_frames'])} "
+                f"({100.0 * step['row'] / step['n_rows']:.1f}% into the run) while its "
+                "own sensor clock, frames and encoder ran on unbroken. Check the "
+                "Gocator shows PTP locked before a run starts",
+                impact_pct=100.0 * step["moved_rows"] / step["n_rows"],
+                frame=step["frame"], moved_rows=step["moved_rows"],
+                max_shift_ms=step["max_shift_ms"])
+        elif step:
             report.add(
                 f"format.gocator_{side.lower()}_ptp_step", f"Gocator {side} PTP clock step",
                 Severity.WARN,
