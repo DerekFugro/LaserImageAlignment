@@ -154,6 +154,22 @@ _LENS_KEY = "#lens_height"
 # runs: with it, and photo n paired with trigger n-1, all 25 stick passes
 # from 5 to 11 km/h sat within 17 mm RMS of both lasers.
 _DELAY_PREFIX = "#delay:"
+# "## ROW camera view distance" + a bare number in METRES -> "#view:ROW".
+# How far ahead of the camera's own lever-arm position the ground it is
+# tagged with lies (Derek, 2026-10-30). A camera looking ahead shows ground in
+# front of it; with this, its GPS is that ground, so an object seen by the
+# Rear (looking down) and the ROW camera carries the same GPS in both.
+_VIEW_PREFIX = "#view:"
+
+
+def view_distance_m(arms: dict | None, camera_name: str | None) -> float | None:
+    """Metres forward from this camera's lever arm to the ground its GPS
+    should name, or None when the lever-arm file states none (GPS = the
+    camera's own position, as before)."""
+    if not arms or not camera_name:
+        return None
+    v = arms.get(_VIEW_PREFIX + camera_name)
+    return float(v[0]) if v else None
 
 
 def trigger_delay_s(arms: dict | None, camera_name: str | None) -> float | None:
@@ -223,6 +239,8 @@ def parse_lever_arms_checked(
             low = head.lower()
             if low.startswith("gocator"):
                 name = "L" if "left" in low else "R" if "right" in low else ""
+            elif "view distance" in low:
+                name = _VIEW_PREFIX + head.split()[0]
             elif "delay" in low:
                 name = _DELAY_PREFIX + head.split()[0]
             elif low.endswith("camera"):
@@ -232,7 +250,7 @@ def parse_lever_arms_checked(
             else:
                 name = ""
             continue
-        if name == _LENS_KEY or name.startswith(_DELAY_PREFIX):
+        if name == _LENS_KEY or name.startswith((_DELAY_PREFIX, _VIEW_PREFIX)):
             m = _BARE_NUMBER_RE.match(line)
             if m:
                 axes["X"] = m.group(1)

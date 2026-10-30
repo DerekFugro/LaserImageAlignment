@@ -162,9 +162,10 @@ def process_run(run: disc.RunPaths) -> RunResult:
             # force and a Locate...d file is honoured.
             arm_xyz = (parsed.lever_arms or {}).get(cam_name)
             arm = None if arm_xyz is None else -float(arm_xyz[0])
+            view = cal.view_distance_m(parsed.lever_arms, cam_name)
             result.camera_alignments[cam_name] = align_images(
                 cam_images, result.triggers, cam_match, ptp, parsed.nav,
-                arm_xyz=arm_xyz, delay_s=delay or 0.0)
+                arm_xyz=arm_xyz, delay_s=delay or 0.0, view_m=view or 0.0)
             report.add(
                 f"align.camera.{cam_name}.delay", f"Camera '{cam_name}' trigger delay",
                 Severity.PASS,
@@ -187,8 +188,13 @@ def process_run(run: disc.RunPaths) -> RunResult:
             report.add(
                 f"align.camera.{cam_name}.arm", f"Camera '{cam_name}' lever arm",
                 Severity.PASS if arm_xyz is not None else Severity.FAIL,
-                (f"position = image footprint centre (arm X {arm_xyz[0]:+.3f}, "
-                 f"Y {arm_xyz[1]:+.3f}, Z {arm_xyz[2]:+.3f} m from the file)"
+                ((f"position = image footprint centre (arm X {arm_xyz[0]:+.3f}, "
+                  f"Y {arm_xyz[1]:+.3f}, Z {arm_xyz[2]:+.3f} m from the file)"
+                  if not view else
+                  f"position = the ground the picture shows, {view:.2f} m ahead of "
+                  f"the camera (view distance) - camera arm X {arm_xyz[0]:+.3f}, "
+                  f"Y {arm_xyz[1]:+.3f}, Z {arm_xyz[2]:+.3f} m; the camera's own "
+                  "position is in the table's camera_latitude/longitude columns")
                  if arm_xyz is not None else
                  f"no '{cam_name} camera' section in the lever-arm file - this "
                  "camera's images and the table are held until it has one"),
@@ -389,6 +395,11 @@ EXPORT_COLUMNS = [
     "utc_iso", "ptp_us", "dist_along_track_m", "section", "section_distance_mm",
     "latitude_deg", "longitude_deg",
     "altitude_msl_m", "match_residual_m", "ptp_offset_s", "ptp_offset_r", "notes",
+    # Added at the END (2026-10-30) so readers that go by position still work.
+    # latitude/longitude above are what the EXIF says. For a camera with a
+    # view distance (ROW) that is the ground the picture shows; these two are
+    # where the camera itself was. For every other camera they repeat lat/lon.
+    "view_distance_m", "camera_latitude_deg", "camera_longitude_deg",
 ]
 
 
@@ -459,5 +470,10 @@ def export_csv(result: RunResult, out_path: Path, rename_info: dict | None = Non
                     num(al.lon_deg[j]), num(al.alt_m[j], "{:.3f}"),
                     num(al.match.residual_m[j], "{:.3f}"),
                     f"{al.ptp.offset_s:.2f}", f"{al.ptp.r:.4f}", row_notes,
+                    f"{getattr(al, 'view_m', 0.0) or 0.0:.3f}",
+                    num((al.camera_lat_deg if getattr(al, "camera_lat_deg", None)
+                         is not None else al.lat_deg)[j]),
+                    num((al.camera_lon_deg if getattr(al, "camera_lon_deg", None)
+                         is not None else al.lon_deg)[j]),
                 ])
     return out_path

@@ -507,6 +507,12 @@ class ImageAlignment:
     # Along-track arm applied to lat/lon/alt, or None when the camera has no
     # calibrated arm and the raw trigger position was stamped instead.
     arm_m: float | None = None
+    # A camera with a view distance in the lever-arm file is tagged with the
+    # ground it shows, `view_m` ahead of the camera; these keep where the
+    # camera itself was. None when no view distance (lat/lon ARE the camera).
+    view_m: float = 0.0
+    camera_lat_deg: np.ndarray | None = None
+    camera_lon_deg: np.ndarray | None = None
 
 
 def offset_by_lever_arm(lat_deg, lon_deg, alt_m, heading_deg,
@@ -548,7 +554,8 @@ def align_images(images: ImageSet, triggers: TriggerData, match: MatchResult,
                  ptp: PtpOffsetResult, nav: NavTable | None,
                  arm_m: float | None = None,
                  arm_xyz: tuple | None = None,
-                 delay_s: float = 0.0) -> ImageAlignment:
+                 delay_s: float = 0.0,
+                 view_m: float = 0.0) -> ImageAlignment:
     """Position every image.
 
     ``arm_m`` is how far BEHIND the laser this camera's lens sits
@@ -622,11 +629,23 @@ def align_images(images: ImageSet, triggers: TriggerData, match: MatchResult,
         lat = np.full(n, np.nan)
         lon = np.full(n, np.nan)
         alt = np.full(n, np.nan)
+    cam_lat = cam_lon = None
+    view_m = float(view_m or 0.0)
+    if view_m and nav is not None:
+        # A camera looking AHEAD (ROW) is tagged with the ground it shows, not
+        # with where it sits (Derek, 2026-10-30): an ADA pad at the bottom of
+        # a ROW photo is the pad the Rear camera is over 12-13 photos later.
+        # Same rigid-body move along the heading as the arm; altitude stays
+        # the camera's. The camera's own position is kept for the table.
+        cam_lat, cam_lon = lat, lon
+        lat, lon, _ = offset_by_lever_arm(lat, lon, alt, nav.heading_at(utc_s),
+                                          x_m=view_m)
     return ImageAlignment(
         images=images, triggers=triggers, match=match, ptp=ptp,
         utc_s=utc_s, ptp_us=ptp_us, lat_deg=lat, lon_deg=lon, alt_m=alt, dmi_dist_m=dist,
         arm_m=arm_m if arm_m is not None else (
             -float(arm_xyz[0]) if arm_xyz is not None else None),
+        view_m=view_m, camera_lat_deg=cam_lat, camera_lon_deg=cam_lon,
     )
 
 
