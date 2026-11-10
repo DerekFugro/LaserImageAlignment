@@ -58,7 +58,7 @@ DAILY_START_WARN_M = 5.0
 # real ground, but they are not part of the section. They are set aside here so
 # nothing downstream picks them up by accident. The name lives in core.formats
 # because ImageSet has to count them too.
-from .formats import BEFORE_DIR  # noqa: E402  (re-exported for callers here)
+from .formats import BEFORE_DIR, DUPLICATES_DIR, SET_ASIDE_DIRS  # noqa: E402
 
 
 def station_name(distance_mm: float, digits: int = DEFAULT_DIGITS) -> str | None:
@@ -402,9 +402,45 @@ def _rows_for_files_not_seen(manifest: Path, handled: set, folder: Path) -> list
             new = r.get("new_name") or ""
             if not new or r.get("original_name") in handled:
                 continue
-            if (folder / new).is_file() or (folder / BEFORE_DIR / new).is_file():
+            if (folder / new).is_file() or any((folder / d / new).is_file()
+                                               for d in SET_ASIDE_DIRS):
                 keep.append(tuple(r.get(c, "") for c in MANIFEST_COLUMNS))
     return keep
+
+
+def move_duplicates(folder: Path, names: list) -> tuple[int, list]:
+    """Missing images mode (Derek, 2026-11-10): move photos of the same spot
+    as the photo before them (taken while the van stood still) into
+    Duplicates/. Same lifecycle as BeforeCollection: counted by the scan,
+    brought back at the start of a re-run, and noted in the manifest."""
+    folder = Path(folder)
+    problems, moved = [], []
+    for n in names:
+        src, dst = folder / n, folder / DUPLICATES_DIR / n
+        if not src.is_file():
+            continue
+        if dst.exists():
+            problems.append(f"{n}: already in {DUPLICATES_DIR}")
+            continue
+        moved.append(n)
+    if moved:
+        (folder / DUPLICATES_DIR).mkdir(exist_ok=True)
+    for n in moved:
+        os.rename(folder / n, folder / DUPLICATES_DIR / n)
+    man = folder / MANIFEST_NAME
+    if man.is_file() and moved:
+        names_set = set(moved)
+        with open(man, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        for r in rows:
+            if r["new_name"] in names_set:
+                r["note"] = (f"same spot as the photo before it (van standing still) - "
+                             f"moved to {DUPLICATES_DIR}/")
+        with atomic_open(man) as fh:
+            w = csv.DictWriter(fh, fieldnames=MANIFEST_COLUMNS)
+            w.writeheader()
+            w.writerows(rows)
+    return len(moved), problems
 
 
 def move_before_collection(folder: Path, dry_run: bool = False) -> tuple[int, list]:
@@ -476,22 +512,24 @@ def restore_set_aside(folder: Path) -> tuple[list, list]:
     each image's original odometer counter.
     """
     folder = Path(folder)
-    aside = folder / BEFORE_DIR
-    if not aside.is_dir():
-        return [], []
     moved, problems = [], []
-    for p in sorted(aside.glob("*.jpg")):
-        target = folder / p.name
-        if target.exists():
-            problems.append(f"{p.name}: the camera folder already holds that "
-                            "name - left in " + BEFORE_DIR)
+    # Duplicates/ (missing images mode) comes back the same way
+    for sub in SET_ASIDE_DIRS:
+        aside = folder / sub
+        if not aside.is_dir():
             continue
-        os.rename(p, target)
-        moved.append(p.name)
-    try:
-        aside.rmdir()           # only succeeds when it is now empty
-    except OSError:
-        pass
+        for p in sorted(aside.glob("*.jpg")):
+            target = folder / p.name
+            if target.exists():
+                problems.append(f"{p.name}: the camera folder already holds that "
+                                "name - left in " + sub)
+                continue
+            os.rename(p, target)
+            moved.append(p.name)
+        try:
+            aside.rmdir()           # only succeeds when it is now empty
+        except OSError:
+            pass
     return moved, problems
 
 
@@ -509,13 +547,14 @@ def undo_renames(folder: Path) -> tuple[int, list]:
     # an image set aside as before-the-section still belongs to this folder;
     # undo has to reach into BeforeCollection/ or it would report it missing
     # and silently leave it stranded under a name nothing else understands.
-    before = folder / BEFORE_DIR
-    for n, o in pairs:
-        stray = before / n
-        if stray.is_file() and not (folder / n).exists():
-            os.rename(stray, folder / n)
-    if before.is_dir() and not any(before.iterdir()):
-        before.rmdir()
+    for sub in SET_ASIDE_DIRS:
+        before = folder / sub
+        for n, o in pairs:
+            stray = before / n
+            if stray.is_file() and not (folder / n).exists():
+                os.rename(stray, folder / n)
+        if before.is_dir() and not any(before.iterdir()):
+            before.rmdir()
     live = [(n, o) for n, o in pairs if (folder / n).exists()]
     for n, o in pairs:
         if not (folder / n).exists() and not (folder / o).exists():

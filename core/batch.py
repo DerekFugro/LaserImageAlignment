@@ -1046,7 +1046,8 @@ def _restore_set_aside(root: Path, run_ids: set) -> tuple[list[str], list[Path]]
     for cam_dir in sorted(p for p in images.glob("*/*") if p.is_dir()):
         if cam_dir.name == BEFORE_DIR or cam_dir.parent.name not in run_ids:
             continue
-        if not (cam_dir / BEFORE_DIR).is_dir():
+        from .formats import SET_ASIDE_DIRS
+        if not any((cam_dir / d).is_dir() for d in SET_ASIDE_DIRS):
             continue
         moved, problems = restore_set_aside(cam_dir)
         where = f"{cam_dir.parent.name}/{cam_dir.name}"
@@ -1068,10 +1069,12 @@ def _missing_images_note(result) -> str:
         return ""
     cam = "Rear" if "Rear" in als else sorted(als)[0]
     spans = result.estimated_spans.get(cam) if hasattr(result, "estimated_spans") else None
-    gap, status = _gaps_and_status(als[cam], spans)
+    gap, status = _gaps_and_status(als[cam], spans,
+                                   getattr(result, "duplicates", {}).get(cam))
     holes = gap[gap > 0]
     n_est = sum(1 for s in status if s == "estimated")
-    if not len(holes) and not n_est:
+    n_dup = sum(1 for s in status if s == "duplicate")
+    if not len(holes) and not n_est and not n_dup:
         return ""
     photos = int(sum(max(1, round((g + TRIGGER_SPACING_M) / TRIGGER_SPACING_M) - 1)
                      for g in holes))
@@ -1080,6 +1083,10 @@ def _missing_images_note(result) -> str:
             if len(holes) else "missing images: no holes")
     if n_est:
         text += f"; {n_est} {cam} photo(s) estimated"
+    if n_dup:
+        others = [c for c in als if c != cam and getattr(result, "duplicates", {}).get(c)]
+        text += (f"; {n_dup} duplicate(s) in {cam}/Duplicates/"
+                 + "".join(f", {len(result.duplicates[c])} in {c}/Duplicates/" for c in sorted(others)))
     return text
 
 
@@ -1167,6 +1174,9 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
             if cam_name in NO_RENAME_CAMERAS:
                 o.notes.append(f"RENAME {cam_name}: off - original ACS names kept, "
                                "nothing moved to BeforeCollection (GPS still written)")
+                # duplicates still go (Derek, 2026-11-10: "remove the row
+                # images too") - under their ACS names
+                _move_duplicates(o, res, cam_name, al, None)
                 continue
             arm_xyz = arms.get(cam_name)
             mm = section_distance_mm(
@@ -1191,6 +1201,28 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
                                f"before the section — moved to BeforeCollection/")
             for e in probs:
                 o.warnings.append(f"before-collection {cam_name}: {e}")
+            # Missing images mode: photos of the same spot as the one before
+            # (van standing still) go to Duplicates/ (Derek, 2026-11-10).
+            _move_duplicates(o, res, cam_name, al, r)
+
+
+def _move_duplicates(o, res, cam_name, al, ren) -> None:
+    """Move this camera's duplicate photos into Duplicates/ under the names
+    they have now (renamed or not), and say so on the run's line."""
+    dups = sorted(getattr(res, "duplicates", {}).get(cam_name, {}))
+    if not dups:
+        return
+    from .rename import move_duplicates
+    finals = list(getattr(ren, "final_names", []) or [])
+    names = [finals[j] if j < len(finals) else al.images.files[j] for j in dups]
+    names = [n for n in names if not str(n).startswith("-")]
+    n_dup, probs = move_duplicates(Path(al.images.dir), names)
+    if n_dup:
+        o.notes.append(f"DUPLICATES {cam_name}: {n_dup} photo(s) of the same "
+                       "spot as the photo before (van standing still) - "
+                       "moved to Duplicates/")
+    for e in probs:
+        o.warnings.append(f"duplicates {cam_name}: {e}")
 
 
 # Cameras whose photos are NOT renamed or moved to BeforeCollection - they get

@@ -30,6 +30,12 @@ TRAILING_ROWS_IGNORED = 2
 # housekeeping, not a change of ownership — so anything counting a run has to
 # count them (see ImageSet.n_set_aside).
 BEFORE_DIR = "BeforeCollection"
+# Missing images mode (Derek, 2026-11-10): photos taken while the van stood
+# still - a loose encoder wire fires pulses at a standstill, so two or three
+# pictures of the same spot - are filed here. Still the run's images, counted
+# like BeforeCollection.
+DUPLICATES_DIR = "Duplicates"
+SET_ASIDE_DIRS = (BEFORE_DIR, DUPLICATES_DIR)
 
 # ONE physical wheel encoder feeds BOTH the SBG (Kalman aiding, and firing the
 # 0.75 m camera triggers logged in eventOutA) and the Gocator (which triggers
@@ -884,8 +890,8 @@ class ImageSet:
             raise ParseError(images_dir, "no numbered .jpg files found")
         entries.sort()
         counters = np.asarray([e[0] for e in entries], dtype=np.int64)
-        aside = images_dir / BEFORE_DIR
-        n_aside = len(list(aside.glob("*.jpg"))) if aside.is_dir() else 0
+        n_aside = sum(len(list((images_dir / d).glob("*.jpg")))
+                      for d in SET_ASIDE_DIRS if (images_dir / d).is_dir())
         return cls(dir=str(images_dir), files=[e[1] for e in entries],
                    counter_mm=counters, n_set_aside=n_aside)
 

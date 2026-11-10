@@ -126,3 +126,72 @@ def test_camera_start_an_hour_off_is_not_used():
                        clock_local=np.array([1000.0]), clock_offset=np.array([3660.0]))
     trig = np.array([1003.0, 1003.5, 1004.0])      # really 3 s after the start
     assert cl.from_start(log, trig, 0.32, 995.0) is None
+
+
+# --- duplicates: photos of the same spot (van standing still) -------------
+
+def _al_with_dist(d):
+    class _Al:
+        pass
+    al = _Al()
+    n = len(d)
+    al.images = ImageSet(dir="x", files=[f"{750 * k:012d}.jpg" for k in range(1, n + 1)],
+                         counter_mm=np.array([750 * k for k in range(1, n + 1)]))
+    al.match = type("M", (), {"trigger_for_image": np.arange(n)})()
+    al.dmi_dist_m = np.array(d, dtype=float)
+    al.lat_deg = np.arange(n, dtype=float)
+    al.lon_deg = np.arange(n, dtype=float) * 10
+    al.alt_m = np.zeros(n)
+    al.camera_lat_deg = al.camera_lon_deg = None
+    return al
+
+
+def test_duplicates_101107_shape(monkeypatch):
+    import core.pipeline as pl
+    monkeypatch.setattr(pl, '_picture_shift_px', lambda a, b: 5.0)   # pictures agree
+    from core.pipeline import _duplicates
+    # 101107 photos 89-93: 886.43, 886.79, 886.82, 886.85, then 893.81
+    al = _al_with_dist([886.43, 886.79, 886.82, 886.85, 893.81, 894.56])
+    dups = _duplicates(al)
+    assert dups == {2: 1, 3: 1}
+    assert al.lat_deg[2] == al.lat_deg[3] == al.lat_deg[1]      # the kept photo's GPS
+    assert al.lat_deg[4] == 4
+
+
+def test_a_slow_creep_does_not_chain(monkeypatch):
+    import core.pipeline as pl
+    monkeypatch.setattr(pl, '_picture_shift_px', lambda a, b: 5.0)
+    from core.pipeline import _duplicates
+    al = _al_with_dist([0.0, 0.04, 0.08, 0.12, 0.16, 0.20])
+    assert _duplicates(al) == {1: 0, 2: 0, 4: 3, 5: 3}
+
+
+def test_duplicates_folder_lifecycle(tmp_path):
+    from core.formats import DUPLICATES_DIR
+    from core.rename import move_duplicates, restore_set_aside
+    for k in range(1, 6):
+        (tmp_path / f"{750 * k:012d}.jpg").write_bytes(b"x")
+    n, probs = move_duplicates(tmp_path, ["000000002250.jpg"])
+    assert n == 1 and not probs
+    assert (tmp_path / DUPLICATES_DIR / "000000002250.jpg").is_file()
+    s = ImageSet.scan(tmp_path)
+    assert len(s) == 4 and s.n_set_aside == 1                    # still counted
+    moved, probs = restore_set_aside(tmp_path)                   # a re-run brings it back
+    assert moved == ["000000002250.jpg"] and not (tmp_path / DUPLICATES_DIR).exists()
+    assert len(ImageSet.scan(tmp_path)) == 5
+
+
+def test_pulse_says_duplicate_but_picture_moved(monkeypatch):
+    """093228 photo 4: 6 cm by its (estimated) pulse, 454 px by its picture."""
+    import core.pipeline as pl
+    monkeypatch.setattr(pl, "_picture_shift_px", lambda a, b: 454.0)
+    al = _al_with_dist([0.0, 0.75, 0.78, 1.5])
+    assert pl._duplicates(al) == {}
+
+
+def test_row_follows_rear_by_pulse():
+    from core.pipeline import _duplicates_by_pulse
+    al = _al_with_dist([0.0, 0.75, 0.76, 1.5])
+    al.match.trigger_for_image = np.array([-1, 5, 6, 7])
+    dups = _duplicates_by_pulse(al, {6: 5})       # Rear: pulse 6's photo repeats pulse 5's
+    assert dups == {2: 1} and al.lat_deg[2] == al.lat_deg[1]

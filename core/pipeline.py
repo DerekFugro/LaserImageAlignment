@@ -54,6 +54,9 @@ class RunResult:
     # Missing images mode: per camera, the (first, last) photo ordinals whose
     # pulse was worked out rather than proven (see _pairing)
     estimated_spans: dict = field(default_factory=dict)
+    # Missing images mode: per camera, {photo index: index of the photo it
+    # repeats} for photos of the same spot (see _duplicates)
+    duplicates: dict = field(default_factory=dict)
 
     @property
     def export_blocked(self) -> bool:
@@ -205,6 +208,33 @@ def process_run(run: disc.RunPaths) -> RunResult:
                  f"no '{cam_name} camera' section in the lever-arm file - this "
                  "camera's images and the table are held until it has one"),
                 blocks=(TARGET_IMAGES, TARGET_CSV), arm_m=arm)
+
+        # Missing images mode: photos taken while the van stood still
+        if parsed.triggers_dropped or any(c.check_id.endswith(".missing_images")
+                                          for c in report.checks):
+            # The picture check needs a camera looking DOWN: ROW looks ahead,
+            # and its far scenery barely moves even when the van does (15-94 px
+            # a step on 093228). So Rear decides, and every other camera takes
+            # the same verdict for the same pulse (Derek: ROW's go too).
+            als = result.camera_alignments
+            judge = "Rear" if "Rear" in als else next(iter(als), None)
+            verdict = _duplicates(als[judge]) if judge else {}
+            by_pulse = {int(als[judge].match.trigger_for_image[j]):
+                        int(als[judge].match.trigger_for_image[k])
+                        for j, k in verdict.items()} if judge else {}
+            for cam_name, al in als.items():
+                dups = verdict if cam_name == judge else \
+                    _duplicates_by_pulse(al, by_pulse)
+                if dups:
+                    result.duplicates[cam_name] = dups
+                    report.add(
+                        f"align.camera.{cam_name}.duplicates",
+                        f"Camera '{cam_name}' duplicate photos", Severity.WARN,
+                        f"{len(dups)} photo(s) of the same spot as the photo before them "
+                        "(the van standing still while the loose encoder fired pulses; "
+                        f"checked on the {judge} pictures) - given that photo's GPS and "
+                        "moved to Duplicates/ by the batch",
+                        photos=[al.images.files[j] for j in sorted(dups)])
 
         # ONE position per image. `result.alignment` is what the viewer reads;
         # camera_alignments[cam] is what the EXIF, the Gocator CSVs and the
@@ -509,7 +539,125 @@ EXPORT_COLUMNS = [
 HOLE_MIN_EXTRA_M = 0.5
 
 
-def _gaps_and_status(al, spans) -> tuple[np.ndarray, list]:
+# Two photos whose pulses are this close were taken at the same spot: on
+# 20261031.101107 photos 90-92 were 3 cm apart (pulses 1.6 s apart, the van
+# standing still) and look the same; normal photos are 0.57-0.86 m apart.
+# The pulse distance alone is NOT enough (see DUPLICATE_MAX_SHIFT_PX below).
+DUPLICATE_MAX_M = 0.05
+
+
+def _no_rename() -> set:
+    from .batch import NO_RENAME_CAMERAS
+    return set(NO_RENAME_CAMERAS)
+
+
+# ...and the PICTURE must agree. The pulse distance only finds candidates: in a
+# stretch whose pulses were worked out ("estimated"), it can be wrong -
+# 20261101.093228 photo 4 was 6 cm from photo 2 by its pulse but its picture
+# had moved 454 px (34 cm). A candidate is a duplicate only when its picture
+# moved less than this from the photo it repeats (about 1330 px per metre).
+DUPLICATE_MAX_SHIFT_PX = 100
+DUPLICATE_MIN_MATCHES = 30
+
+
+def _picture_shift_px(path_a, path_b) -> float | None:
+    """How far the ground moved between two photos, in full-size pixels, from
+    matched features (the most common shift). None when it can't be measured."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    scale = 0.5
+
+    def load(p):
+        g = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+        if g is None:
+            return None
+        g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        return cv2.createCLAHE(2.0, (8, 8)).apply(g)
+
+    a, b = load(path_a), load(path_b)
+    if a is None or b is None:
+        return None
+    orb = cv2.ORB_create(4000)
+    ka, da = orb.detectAndCompute(a, None)
+    kb, db = orb.detectAndCompute(b, None)
+    if da is None or db is None:
+        return None
+    m = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(da, db)
+    if len(m) < DUPLICATE_MIN_MATCHES:
+        return None
+    d = (np.float32([kb[x.trainIdx].pt for x in m])
+         - np.float32([ka[x.queryIdx].pt for x in m]))
+    # the shift most matches agree on (a fixed sample of candidates, so the
+    # answer is the same every run)
+    best, best_n = None, 0
+    for c in d[:: max(1, len(d) // 300)]:
+        n = int(np.sum(np.linalg.norm(d - c, axis=1) < 3))
+        if n > best_n:
+            best, best_n = c, n
+    if best_n < DUPLICATE_MIN_MATCHES:
+        return None
+    sel = np.linalg.norm(d - best, axis=1) < 3
+    return float(np.linalg.norm(np.median(d[sel], axis=0)) / scale)
+
+
+def _duplicates_by_pulse(al, by_pulse: dict) -> dict:
+    """Duplicates for a camera that can't judge its own pictures: the photo
+    taken on a pulse the judging camera called a duplicate repeats the photo
+    taken on that camera's kept pulse. Gets that photo's position."""
+    trg = al.match.trigger_for_image
+    photo_of = {int(t): j for j, t in enumerate(trg) if int(t) >= 0}
+    out = {}
+    for j, t in enumerate(trg):
+        k = photo_of.get(by_pulse.get(int(t), -1)) if int(t) >= 0 else None
+        if k is None:
+            continue
+        out[j] = k
+        for arr in (al.lat_deg, al.lon_deg, al.alt_m, al.camera_lat_deg, al.camera_lon_deg):
+            if arr is not None:
+                arr[j] = arr[k]
+    return out
+
+
+def _duplicates(al) -> dict:
+    """{photo index: index of the photo it repeats}, and give each duplicate
+    that photo's position (Derek, 2026-11-10: same GPS). The first photo of a
+    group is kept; the distance is measured to it, so a slow creep can't chain.
+    A candidate found by its pulse is only a duplicate when its picture agrees
+    (see DUPLICATE_MAX_SHIFT_PX)."""
+    out = {}
+    folder = Path(al.images.dir)
+    trg = al.match.trigger_for_image
+    dist = np.asarray(al.dmi_dist_m, dtype=np.float64)
+    ordinal = np.rint(np.asarray(al.images.counter_mm, dtype=np.float64) / 750.0)
+    keep = prev = None
+    for j in np.argsort(ordinal):
+        if int(trg[j]) < 0 or not np.isfinite(dist[j]):
+            continue
+        # under 5 cm from the photo before AND under 10 cm from the one kept:
+        # 101107 photos 90, 91, 92 were 3 cm apart each (6 cm end to end) and
+        # all look the same, while a slow creep can't chain on for metres
+        near = (prev is not None and abs(dist[j] - dist[prev]) < DUPLICATE_MAX_M
+                and abs(dist[j] - dist[keep]) < 2 * DUPLICATE_MAX_M)
+        if near:
+            shift = _picture_shift_px(folder / al.images.files[j],
+                                      folder / al.images.files[keep])
+            near = shift is not None and shift < DUPLICATE_MAX_SHIFT_PX
+        prev = j
+        if near:
+            out[int(j)] = int(keep)
+            for arr in (al.lat_deg, al.lon_deg, al.alt_m):
+                arr[j] = arr[keep]
+            for arr in (al.camera_lat_deg, al.camera_lon_deg):
+                if arr is not None:
+                    arr[j] = arr[keep]
+            continue
+        keep = j
+    return out
+
+
+def _gaps_and_status(al, spans, dups=None) -> tuple[np.ndarray, list]:
     """Per image: metres missing before it, and 'confirmed'/'estimated'."""
     n = len(al.images)
     gap = np.zeros(n)
@@ -530,6 +678,8 @@ def _gaps_and_status(al, spans) -> tuple[np.ndarray, list]:
         prev = i
     status = ["estimated" if any(a <= o <= b for a, b in (spans or [])) else "confirmed"
               for o in ordinal]
+    for j in (dups or {}):
+        status[j] = "duplicate"
     return gap, status
 
 
@@ -541,15 +691,18 @@ def write_missing_photos_csv(result: "RunResult", out_dir: Path,
     out = Path(out_dir) / f"MissingPhotos_{result.run.run_id}.csv"
     rows = []
     for cam_name, al in sorted(result.camera_alignments.items()):
-        gap, _ = _gaps_and_status(al, result.estimated_spans.get(cam_name))
+        gap, _ = _gaps_and_status(al, result.estimated_spans.get(cam_name),
+                                  result.duplicates.get(cam_name))
         ren = (rename_info or {}).get(cam_name)
         finals = list(getattr(ren, "final_names", []) or [])
         ordinal = np.rint(np.asarray(al.images.counter_mm, dtype=np.float64) / 750.0)
+        dups = result.duplicates.get(cam_name, {})
         order = list(np.argsort(ordinal))
         for pos, j in enumerate(order):
             if gap[j] <= 0 or pos == 0:
                 continue
             a = order[pos - 1]
+            a = dups.get(a, a)     # name the photo kept, not one moved to Duplicates/
             name = lambda x: finals[x] if x < len(finals) else al.images.files[x]
             length = gap[j] + TRIGGER_SPACING_M
             t0, t1 = al.utc_s[a], al.utc_s[j]
@@ -613,7 +766,15 @@ def export_csv(result: RunResult, out_path: Path, rename_info: dict | None = Non
             dists = list(getattr(ren, "distances_mm", []) or [])
             aside = ren.set_aside() if ren is not None else []
             section = getattr(ren, "section", "") or ""
-            gap, status = _gaps_and_status(al, getattr(result, "estimated_spans", {}).get(cam_name))
+            dups = getattr(result, "duplicates", {}).get(cam_name, {})
+            gap, status = _gaps_and_status(al, getattr(result, "estimated_spans", {}).get(cam_name),
+                                           dups)
+            # a duplicate the batch moved into Duplicates/ is set aside too
+            # (every camera, ROW included - Derek 2026-11-10)
+            if rename_info and dups:
+                aside = list(aside) + [False] * max(0, len(al.images) - len(aside))
+                for j in dups:
+                    aside[j] = True
             for j in range(len(al.images)):
                 i = int(al.match.trigger_for_image[j])
                 matched = i >= 0
