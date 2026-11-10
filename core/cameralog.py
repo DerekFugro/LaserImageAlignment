@@ -46,6 +46,9 @@ FIT_K_RANGE = range(-3, 61)
 # only to about 0.1 s through the SBG log, and the log line is written a
 # little after the camera call returns
 START_MARGIN_S = 1.0
+# cameras ready this long before or after the first pulse is not a real start
+# (the longest seen on a good run: ready 10 s before - see the module notes)
+START_MAX_LEAD_S = 120.0
 
 _TS = r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[,.]\d{3})"
 _FRAME_RE = re.compile(
@@ -247,6 +250,99 @@ def fit_frames(frames: list, trig_utc: np.ndarray) -> OffsetResult | None:
         f"(best {best * 1000:.0f} ms, next {second * 1000:.0f} ms)")
 
 
+# --- Missing images mode (Derek, 2026-11-10) ---------------------------------
+# A loose encoder power wire (20261101.093228) made the SBG send pulses the
+# camera never photographed - too close together - beyond what the 0.13 s
+# rule catches. One k then no longer fits the whole run: the camera log said
+# photos 100-600 came from pulse n+0, 700-1100 from n+5, 1200+ from n+6. The
+# log line every 100th photo shows exactly which stretch gained the extra
+# pulses, so they can be found and passed over.
+FOLLOW_TOL_S = 0.06      # a frame matches a pulse when within this (camera vs SBG clock)
+FOLLOW_K_RANGE = range(-20, 81)
+FOLLOW_BEST_MAX_S = 0.025   # mean miss of the accepted tie (real runs: 1-9 ms)
+FOLLOW_MIN_MARGIN_S = 0.010 # and this much better than the next tie
+
+
+def follow_frames(frames: list, trig_utc: np.ndarray) -> list | None:
+    """Which pulse took each camera-log frame. The camera clock and the pulse
+    times are tied once, at the first frame; every later frame must then land
+    on some pulse within FOLLOW_TOL_S on that same tie (the two clocks drift
+    ~17 ms an hour - 20261101.093228). A wrong tie is off by a fraction of a
+    pulse gap and misses; the right one fits every frame.
+
+    Returns [(photo ordinal, k), ...] with photo n <- pulse n + k, or None when
+    no single tie fits every frame (then nothing is changed)."""
+    if len(frames) < 2:
+        return None
+    t = np.asarray(trig_utc, dtype=np.float64)
+    n = len(t)
+    fits = []
+    o0, c0 = frames[0]
+    for k0 in FOLLOW_K_RANGE:
+        i0 = o0 + k0 - 1
+        if not 0 <= i0 < n:
+            continue
+        off = c0 - t[i0]
+        seq, total = [(o0, k0)], 0.0
+        for o, c in frames[1:]:
+            cand = [(abs(c - t[o + k - 1] - off), k) for k in FOLLOW_K_RANGE
+                    if 0 <= o + k - 1 < n]
+            err, k = min(cand) if cand else (np.inf, None)
+            if err > FOLLOW_TOL_S:
+                seq = None
+                break
+            seq.append((o, k))
+            total += err
+        if seq is not None:
+            fits.append((total / max(1, len(frames) - 1), seq))
+    if not fits:
+        return None
+    fits.sort(key=lambda f: f[0])
+    best = fits[0]
+    # At an even walking pace a tie one pulse off can also land every frame
+    # within the tolerance - but only roughly (tens of ms), where the right
+    # tie lands within a few. Accept the best only when it is tight and
+    # clearly ahead of the next; otherwise don't guess.
+    if best[0] > FOLLOW_BEST_MAX_S:
+        return None
+    if len(fits) > 1 and fits[1][0] - best[0] < FOLLOW_MIN_MARGIN_S:
+        return None
+    return best[1]
+
+
+def extra_pulses(seq: list, trig_utc: np.ndarray, k_start: int | None,
+                 first_photo: int = 2) -> tuple[list, list] | None:
+    """Pulses that took no photo, found from a followed frame sequence.
+
+    Between two frames whose k goes UP by d, d pulses in that stretch got no
+    photo; the d with the shortest gap to the pulse before them are taken (the
+    camera misses the pulse that comes too soon). `k_start` is the pairing at
+    the start of the run (camera start), which closes the first stretch.
+
+    Returns ([pulse indices to pass over], [(first photo, last photo) of every
+    stretch whose photos are therefore estimated]), or None when k goes DOWN
+    somewhere (a photo with no pulse - not something passing over can fix)."""
+    t = np.asarray(trig_utc, dtype=np.float64)
+    anchors = list(seq)
+    if k_start is not None and seq and seq[0][1] != k_start and seq[0][0] > first_photo:
+        anchors = [(first_photo, k_start)] + anchors
+    drop, spans = [], []
+    for (oa, ka), (ob, kb) in zip(anchors, anchors[1:]):
+        d = kb - ka
+        if d < 0:
+            return None
+        if d == 0:
+            continue
+        lo, hi = oa + ka - 1, ob + kb - 1          # pulse indices of the two anchors
+        cand = list(range(lo + 1, hi))
+        if len(cand) < d:
+            return None
+        gaps = sorted(cand, key=lambda i: t[i] - t[i - 1])
+        drop += sorted(gaps[:d])
+        spans.append((oa + 1, ob - 1))
+    return sorted(drop), spans
+
+
 def from_start(log: CameraLog, trig_utc: np.ndarray, delay_s: float,
                run_start_local: float) -> OffsetResult | None:
     """Offset from when acquisition started. None when the log has no start
@@ -263,6 +359,12 @@ def from_start(log: CameraLog, trig_utc: np.ndarray, delay_s: float,
         return None
     first_exposure = float(trig_utc[0]) + float(delay_s)
     lead = first_exposure - ready
+    # The cameras start a few seconds either side of the first pulse. A lead of
+    # minutes means the PC clock was tied to GPS time wrongly - 20261101.093228,
+    # the day the clocks went back an hour, came out "3660 s late" and paired
+    # photo n with pulse n+2977. Not a decision to act on.
+    if abs(lead) > START_MAX_LEAD_S:
+        return None
     if lead >= START_MARGIN_S:
         return OffsetResult(
             -1, "camera start", True,

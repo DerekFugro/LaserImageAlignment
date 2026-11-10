@@ -15,7 +15,7 @@ from . import calibration as cal
 from . import discovery as disc
 from .atomic import atomic_open
 from .alignment import (
-    ImageAlignment, MatchResult, PtpOffsetResult, TriggerData,
+    TRIGGER_SPACING_M, ImageAlignment, MatchResult, PtpOffsetResult, TriggerData,
     align_images, build_triggers, gocator_distances, match_images_to_triggers,
     solve_ptp_offset,
 )
@@ -51,6 +51,9 @@ class RunResult:
     camera_matches: dict = field(default_factory=dict)     # name -> MatchResult
     gocator_l_dist_m: np.ndarray | None = None
     gocator_r_dist_m: np.ndarray | None = None
+    # Missing images mode: per camera, the (first, last) photo ordinals whose
+    # pulse was worked out rather than proven (see _pairing)
+    estimated_spans: dict = field(default_factory=dict)
 
     @property
     def export_blocked(self) -> bool:
@@ -91,13 +94,16 @@ def process_run(run: disc.RunPaths) -> RunResult:
     usable = None
     if result.triggers is not None:
         usable = _camera_usable_triggers(parsed, result.triggers, report)
-        lags = _pairing(run, parsed, result.triggers, report, usable)
+        lags, usable_by_cam, result.estimated_spans = _pairing(
+            run, parsed, result.triggers, report, usable)
+    else:
+        usable_by_cam = {}
     if parsed.images is not None and result.triggers is not None:
         primary = _camera_name_of(parsed, parsed.images)
         result.match = match_images_to_triggers(
             parsed.images, result.triggers,
             photo_lag=lags.get(primary, _photo_lag(parsed, primary)),
-            usable=_usable_for(parsed, primary, usable))
+            usable=usable_by_cam.get(primary, _usable_for(parsed, primary, usable)))
         report.add(
             "align.match", "Image-trigger match",
             Severity.PASS if result.match.n_matched else Severity.FAIL,
@@ -154,7 +160,7 @@ def process_run(run: disc.RunPaths) -> RunResult:
             cam_match = match_images_to_triggers(
                 cam_images, result.triggers,
                 photo_lag=lags.get(cam_name, _photo_lag(parsed, cam_name)),
-                usable=_usable_for(parsed, cam_name, usable))
+                usable=usable_by_cam.get(cam_name, _usable_for(parsed, cam_name, usable)))
             result.camera_matches[cam_name] = cam_match
             # The whole (X, Y, Z) from the lever-arm file - the one parsed
             # for THIS run (parsed.lever_arms, from run.paths), not a
@@ -278,7 +284,7 @@ def _usable_for(parsed, cam_name, usable):
     return usable
 
 
-def _pairing(run, parsed, triggers, report, usable=None) -> dict:
+def _pairing(run, parsed, triggers, report, usable=None):
     """photo_lag per camera that has a trigger delay, decided in Derek's order
     (2026-10-20): camera log frame times, then the camera start, then photo n
     = trigger n-1 assumed. Cameras without a delay keep the old rule (lag 0).
@@ -287,18 +293,46 @@ def _pairing(run, parsed, triggers, report, usable=None) -> dict:
 
     `usable`: the triggers the camera could photograph. The camera log and
     the photo count are judged against those, so a trigger that came too soon
-    does not throw the offset or the count off."""
+    does not throw the offset or the count off.
+
+    Returns (lags, usable per camera, estimated spans per camera). The last
+    two are only filled by missing images mode (see _missing_images)."""
     from . import cameralog
     log_path = run.get(disc.KEY_CAMERA_LOG)
-    lags = {}
+    lags, usable_by_cam, spans_by_cam = {}, {}, {}
+    n_trg = len(triggers.utc_s)
     for cam_name, cam_images in (parsed.cameras or {}).items():
         delay = cal.trigger_delay_s(parsed.lever_arms, cam_name)
         if delay is None:
             continue
         n_photos = len(cam_images) + int(getattr(cam_images, "n_set_aside", 0) or 0)
-        trig_utc = triggers.utc_s if usable is None else np.asarray(triggers.utc_s)[usable]
+        base = np.arange(n_trg) if usable is None else np.asarray(usable)
+        trig_utc = np.asarray(triggers.utc_s)[base]
         r = cameralog.decide(log_path, run.run_id, cam_name, trig_utc,
                              delay, n_photos)
+        fixed = None
+        if not (r.confident and r.method == "camera log"):
+            fixed = _missing_images(log_path, run.run_id, cam_name, base,
+                                    np.asarray(triggers.utc_s), r, report)
+        if fixed is not None:
+            base, k, spans = fixed
+            usable_by_cam[cam_name] = base
+            spans_by_cam[cam_name] = spans
+            r = cameralog.decide(log_path, run.run_id, cam_name,
+                                 np.asarray(triggers.utc_s)[base], delay, n_photos)
+            if int(r.k) != k:
+                # the camera log must now agree on one k; if it does not,
+                # the fix is not trusted and the run keeps the old pairing
+                report.add(f"align.camera.{cam_name}.missing_images",
+                           f"Camera '{cam_name}' missing images", Severity.WARN,
+                           f"pulses with no photo were found, but the camera log "
+                           f"did not agree afterwards (k {int(r.k)} vs {k}) - "
+                           "pairing left as it was; check this run")
+                usable_by_cam.pop(cam_name, None)
+                spans_by_cam.pop(cam_name, None)
+                base = np.arange(n_trg) if usable is None else np.asarray(usable)
+                r = cameralog.decide(log_path, run.run_id, cam_name,
+                                     np.asarray(triggers.utc_s)[base], delay, n_photos)
         lags[cam_name] = -int(r.k)
         ok = r.confident and "COUNT DOES NOT FIT" not in r.message
         report.add(
@@ -308,7 +342,68 @@ def _pairing(run, parsed, triggers, report, usable=None) -> dict:
             camera_log=str(log_path) if log_path else "")
     # different photo counts per camera are judged in qc.check_content
     # (content.camera_counts), which reads these rows
-    return lags
+    return lags, usable_by_cam, spans_by_cam
+
+
+def _missing_images(log_path, run_id, cam_name, base, all_utc, r, report):
+    """Missing images mode (Derek, 2026-11-10): when one pairing does not fit
+    the whole run, follow the camera log's every-100th-photo lines through the
+    pulses, pass over the pulses that took no photo, and say which photos were
+    therefore worked out rather than proven.
+
+    Returns (usable trigger indices, k, [(first, last) photo ordinal]) or None
+    when there is nothing to fix or it can't be fixed safely."""
+    from . import cameralog
+    if log_path is None:
+        return None
+    try:
+        frames = cameralog.load(Path(log_path)).frames.get((run_id, cam_name), [])
+    except OSError:
+        return None
+    if len(frames) < 2:
+        return None
+    trig = all_utc[base]
+    seq = cameralog.follow_frames(frames, trig)
+    if seq is None:
+        return None
+    # the pairing at the start of the run: the camera start when the log has
+    # one, else the start-up-frame rule (photo n = pulse n-1) that every
+    # normal run follows. It closes the stretch before the first log line.
+    k_start = int(r.k) if r.method in ("camera start", "assumed") and r.k is not None else None
+    ks = {k for _, k in seq}
+    if len(ks) == 1 and (k_start is None or seq[0][1] == k_start):
+        return None                      # one pairing fits: nothing missing
+    found = cameralog.extra_pulses(seq, trig, k_start)
+    if found is None:
+        report.add(f"align.camera.{cam_name}.missing_images",
+                   f"Camera '{cam_name}' missing images", Severity.WARN,
+                   "the camera log shows the pairing changing in a way passing over "
+                   "pulses can't explain (a photo with no pulse) - pairing left as it "
+                   f"was; check this run. Log frames (photo, k): {seq}")
+        return None
+    drop, spans = found
+    if not drop:
+        return None
+    k = k_start if k_start is not None else seq[0][1]
+    new = np.delete(np.asarray(base), drop)
+    if cameralog.follow_frames(frames, all_utc[new]) is None or \
+            {kk for _, kk in cameralog.follow_frames(frames, all_utc[new])} != {k}:
+        report.add(f"align.camera.{cam_name}.missing_images",
+                   f"Camera '{cam_name}' missing images", Severity.WARN,
+                   f"{len(drop)} pulse(s) look like they took no photo, but the camera "
+                   "log does not fit one pairing without them - pairing left as it "
+                   "was; check this run")
+        return None
+    where = ", ".join(f"photos {a}-{b}" for a, b in spans)
+    report.add(f"align.camera.{cam_name}.missing_images",
+               f"Camera '{cam_name}' missing images", Severity.WARN,
+               f"{len(drop)} pulse(s) took no photo ({where}) - found from the camera "
+               "log and passed over; every camera-log check point now fits one "
+               "pairing. The photos in those stretches are 'estimated' in the "
+               "alignment table (the exact pulse inside the stretch is the "
+               "likeliest one, not proven)",
+               passed_over=[int(np.asarray(base)[i]) for i in drop], spans=spans)
+    return new, int(k), spans
 
 
 def _recover_pre_collection_triggers(parsed, report) -> tuple[np.ndarray, int]:
@@ -400,7 +495,81 @@ EXPORT_COLUMNS = [
     # view distance (ROW) that is the ground the picture shows; these two are
     # where the camera itself was. For every other camera they repeat lat/lon.
     "view_distance_m", "camera_latitude_deg", "camera_longitude_deg",
+    # Missing images mode (2026-11-10), at the end too. gap_before_m: metres of
+    # ground with no photo just before this one (0 normally) - a stitcher or
+    # reader should not join this photo to the one before. photo_status:
+    # confirmed, or estimated (its pulse worked out, not proven - see
+    # align.camera.<cam>.missing_images).
+    "gap_before_m", "photo_status",
 ]
+
+# a step this much longer than one trigger spacing is a hole, not jitter:
+# normal steps measure 0.566-0.860 m (see content.trigger_gap) and one missing
+# photo makes a 1.5 m step, so the line sits between (a step over 1.25 m)
+HOLE_MIN_EXTRA_M = 0.5
+
+
+def _gaps_and_status(al, spans) -> tuple[np.ndarray, list]:
+    """Per image: metres missing before it, and 'confirmed'/'estimated'."""
+    n = len(al.images)
+    gap = np.zeros(n)
+    trg = al.match.trigger_for_image
+    dist = np.asarray(al.triggers.dist_m, dtype=np.float64)
+    ordinal = np.rint(np.asarray(al.images.counter_mm, dtype=np.float64)
+                      / (TRIGGER_SPACING_M * 1000.0)).astype(np.int64)
+    order = np.argsort(ordinal)
+    prev = None
+    for j in order:
+        i = int(trg[j])
+        if i < 0:
+            continue
+        if prev is not None:
+            step = dist[i] - dist[prev]
+            if np.isfinite(step) and step - TRIGGER_SPACING_M > HOLE_MIN_EXTRA_M:
+                gap[j] = step - TRIGGER_SPACING_M
+        prev = i
+    status = ["estimated" if any(a <= o <= b for a, b in (spans or [])) else "confirmed"
+              for o in ordinal]
+    return gap, status
+
+
+def write_missing_photos_csv(result: "RunResult", out_dir: Path,
+                             rename_info: dict | None = None) -> Path | None:
+    """`MissingPhotos_<run>.csv`: one row per hole (ground with no photo) per
+    camera, with the photos either side. Removed when the run has none, so a
+    re-run never leaves a stale list. Returns the path written, or None."""
+    out = Path(out_dir) / f"MissingPhotos_{result.run.run_id}.csv"
+    rows = []
+    for cam_name, al in sorted(result.camera_alignments.items()):
+        gap, _ = _gaps_and_status(al, result.estimated_spans.get(cam_name))
+        ren = (rename_info or {}).get(cam_name)
+        finals = list(getattr(ren, "final_names", []) or [])
+        ordinal = np.rint(np.asarray(al.images.counter_mm, dtype=np.float64) / 750.0)
+        order = list(np.argsort(ordinal))
+        for pos, j in enumerate(order):
+            if gap[j] <= 0 or pos == 0:
+                continue
+            a = order[pos - 1]
+            name = lambda x: finals[x] if x < len(finals) else al.images.files[x]
+            length = gap[j] + TRIGGER_SPACING_M
+            t0, t1 = al.utc_s[a], al.utc_s[j]
+            iso = lambda t: (datetime.fromtimestamp(t, tz=timezone.utc).strftime("%H:%M:%S")
+                             if np.isfinite(t) else "")
+            rows.append([result.run.run_id, cam_name, name(a), name(j), iso(t0), iso(t1),
+                         f"{length:.2f}", max(1, int(round(length / TRIGGER_SPACING_M)) - 1),
+                         f"{al.lat_deg[a]:.9f}", f"{al.lon_deg[a]:.9f}",
+                         f"{al.lat_deg[j]:.9f}", f"{al.lon_deg[j]:.9f}"])
+    if not rows:
+        if out.exists():
+            out.unlink()
+        return None
+    with atomic_open(out) as fh:
+        w = csv.writer(fh)
+        w.writerow(["run_id", "camera", "last_photo_before", "first_photo_after",
+                    "utc_before", "utc_after", "length_m", "about_missing_photos",
+                    "lat_before", "lon_before", "lat_after", "lon_after"])
+        w.writerows(rows)
+    return out
 
 
 def export_csv(result: RunResult, out_path: Path, rename_info: dict | None = None) -> Path:
@@ -444,6 +613,7 @@ def export_csv(result: RunResult, out_path: Path, rename_info: dict | None = Non
             dists = list(getattr(ren, "distances_mm", []) or [])
             aside = ren.set_aside() if ren is not None else []
             section = getattr(ren, "section", "") or ""
+            gap, status = _gaps_and_status(al, getattr(result, "estimated_spans", {}).get(cam_name))
             for j in range(len(al.images)):
                 i = int(al.match.trigger_for_image[j])
                 matched = i >= 0
@@ -475,5 +645,10 @@ def export_csv(result: RunResult, out_path: Path, rename_info: dict | None = Non
                          is not None else al.lat_deg)[j]),
                     num((al.camera_lon_deg if getattr(al, "camera_lon_deg", None)
                          is not None else al.lon_deg)[j]),
+                    f"{gap[j]:.2f}", status[j],
                 ])
+    try:
+        write_missing_photos_csv(result, out_path.parent, rename_info)
+    except Exception:
+        pass   # the hole list is a convenience; the table above is the record
     return out_path

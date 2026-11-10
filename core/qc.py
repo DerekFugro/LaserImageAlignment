@@ -315,6 +315,7 @@ class ParsedRun:
     images: ImageSet | None = None            # primary camera (viewer)
     cameras: dict = None                      # every camera: name -> ImageSet
     triggers_sbg_us: np.ndarray | None = None
+    triggers_dropped: list | None = None      # data rows passed over (stamped backwards)
     utc: UtcTable | None = None
     dmi: DmiTable | None = None
     nav: NavTable | None = None
@@ -376,8 +377,18 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
             report.add(f"format.camera.{cam_name}", f"Camera '{cam_name}' scan",
                        Severity.FAIL, str(exc))
     trig = attempt("format.event_a", "eventOutA.txt", disc.KEY_EVENT_A,
-                   lambda p: parse_event_triggers(p, with_wraps=True))
-    pr.triggers_sbg_us, trig_wraps = trig if trig is not None else (None, 0)
+                   lambda p: parse_event_triggers(p, drop_backwards=True))
+    pr.triggers_sbg_us, trig_wraps, trig_dropped = trig if trig is not None else (None, 0, [])
+    pr.triggers_dropped = list(trig_dropped)
+    if trig_dropped:
+        # Missing images mode: a loose encoder wire (20261031.101107)
+        report.add(
+            "format.event_a.backwards", "Pulses stamped backwards", Severity.WARN,
+            f"{len(trig_dropped)} camera pulse(s) are stamped earlier than the pulse "
+            f"before them (data rows {', '.join(str(i + 1) for i in trig_dropped[:8])}"
+            f"{' ...' if len(trig_dropped) > 8 else ''}) - passed over. This is the "
+            "mark of the encoder losing power; expect missing images in this run",
+            dropped_rows=[int(i) for i in trig_dropped])
     pr.utc = attempt("format.utc_time", "utcTime.txt", disc.KEY_UTC_TIME, UtcTable.parse)
     if pr.triggers_sbg_us is not None and pr.utc is not None:
         # each file was unwrapped from its own first row; put the triggers on
@@ -763,11 +774,17 @@ def check_content(pr: ParsedRun, report: QCReport,
     # is the same for every camera when the cameras stop together:
     # 20261014.094844 Rear 323 + 4 = ROW 325 + 2 (Derek, 2026-10-20).
     pairing = pairing_offsets(report)
+    # Missing images mode: a camera can also have passed over pulses the
+    # other one photographed (20261101.093228: Rear one more than ROW).
+    passed_cam = {c: len(next((x.values.get("passed_over", []) for x in report.checks
+                               if x.check_id == f"align.camera.{c}.missing_images"), []))
+                  for c in counts}
     explained = (len(set(counts.values())) > 1 and set(counts) <= set(pairing)
-                 and len({counts[c] + pairing[c] for c in counts}) == 1)
+                 and len({counts[c] + pairing[c] + passed_cam[c] for c in counts}) == 1)
     if explained:
-        detail = ", ".join(f"{n}: {c} (photo n = trigger n{pairing[n]:+d})"
-                           for n, c in sorted(counts.items()))
+        detail = ", ".join(f"{n}: {c} (photo n = trigger n{pairing[n]:+d}"
+                           + (f", {passed_cam[n]} pulse(s) with no photo" if passed_cam[n] else "")
+                           + ")" for n, c in sorted(counts.items()))
         report.add(
             "content.camera_counts", "Cameras hold the same image count",
             Severity.PASS,
@@ -844,12 +861,23 @@ def check_content(pr: ParsedRun, report: QCReport,
         k = pairing[primary]
         n_img = len(pr.images) + int(getattr(pr.images, "n_set_aside", 0) or 0)
         n_trg = len(pr.triggers_sbg_us)
+        # pulses already shown to have taken no photo (too soon for the
+        # camera, or found by missing images mode) are not "left at the end"
+        passed = 0
+        for c in report.checks:
+            if c.check_id == "align.trigger_too_soon":
+                passed += len(c.values.get("skipped", []))
+            elif c.check_id == f"align.camera.{primary}.missing_images":
+                passed += len(c.values.get("passed_over", []))
+        n_trg -= passed
         extra = n_img - (n_trg - k)
         ok = -3 <= extra <= 0
         report.add(
             "content.trigger_count", "Trigger vs image count",
             Severity.PASS if ok else Severity.WARN,
-            f"{n_trg} triggers, {n_img} {primary} photos, photo n = trigger n{k:+d}: "
+            f"{n_trg} triggers"
+            + (f" (after {passed} that took no photo)" if passed else "")
+            + f", {n_img} {primary} photos, photo n = trigger n{k:+d}: "
             + ("counts fit" if extra == 0 else
                f"{-extra} trigger(s) at the end got no photo (cameras stopped "
                "while moving)" if extra < 0 else

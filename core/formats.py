@@ -121,17 +121,48 @@ def unwrap_sbg_us(ts) -> tuple[np.ndarray, int]:
     return ts + wraps.astype(np.int64) * SBG_CLOCK_WRAP_US, int(wraps[-1])
 
 
-def parse_event_triggers(path: Path, with_wraps: bool = False):
+# Missing images mode (Derek, 2026-11-10). A loose encoder power wire makes
+# the SBG stamp about one pulse per power drop 4-10 s EARLIER than the one
+# before it (20261031.101107: 2 of 1370, 20261101.093228: 3 of 3041). Those
+# pulses took no photo: dropping them made 101107's count and every camera-log
+# check point fit. More than this share going backwards is not a loose wire
+# but a broken file, and is still refused.
+BACKWARD_PULSES_MAX_FRAC = 0.01
+
+
+def parse_event_triggers(path: Path, with_wraps: bool = False,
+                         drop_backwards: bool = False):
     """eventOutA.txt -> strictly increasing SBG timestamps in microseconds (int64).
 
     The clock roll-over is undone (see SBG_CLOCK_WRAP_US). with_wraps=True
     returns (ts, n_wraps) so a report can say a roll-over was corrected.
+
+    drop_backwards=True passes over a pulse stamped at or before the last one
+    kept (see BACKWARD_PULSES_MAX_FRAC) and returns (ts, n_wraps, dropped),
+    `dropped` being the 0-based data rows passed over.
     """
     names, data = _read_sbg_table(path)
     ts, n_wraps = unwrap_sbg_us(data[:, 0].astype(np.int64))
+    dropped: list = []
+    if drop_backwards and len(ts) >= 2 and not np.all(np.diff(ts) > 0):
+        keep, last = [], None
+        for i, v in enumerate(ts):
+            if last is not None and v <= last:
+                dropped.append(i)
+                continue
+            keep.append(i)
+            last = v
+        if len(dropped) > max(1, BACKWARD_PULSES_MAX_FRAC * len(ts)):
+            raise ParseError(path, f"trigger timestamps not strictly increasing: "
+                                   f"{len(dropped)} of {len(ts)} pulses go backwards "
+                                   f"(first near data row {dropped[0]}) - too many for "
+                                   "a loose encoder wire; the file looks broken")
+        ts = ts[keep]
     if len(ts) >= 2 and not np.all(np.diff(ts) > 0):
         bad = int(np.argmin(np.diff(ts) > 0)) + 1
         raise ParseError(path, f"trigger timestamps not strictly increasing near data row {bad}")
+    if drop_backwards:
+        return ts, n_wraps, dropped
     return (ts, n_wraps) if with_wraps else ts
 
 

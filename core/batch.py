@@ -176,7 +176,8 @@ def preflight(root: Path, calibrations_dir: Path | None = None,
             if navp not in nav_cache:
                 nav_cache[navp] = NavTable.parse(navp, anchor_utc_date=utc.utc_date)
             nav = nav_cache[navp]
-            trig = utc.sbg_to_utc(parse_event_triggers(run.get(disc.KEY_EVENT_A)))
+            trig = utc.sbg_to_utc(parse_event_triggers(run.get(disc.KEY_EVENT_A),
+                                                       drop_backwards=True)[0])
             need_lo, need_hi = float(trig.min()), float(trig.max())
             for gp in pf.gocator_files:
                 span = _gocator_ptp_span(Path(gp))
@@ -720,7 +721,8 @@ def write_run_mapping_csv(report: "BatchReport", out_path: Path) -> Path:
             first = (o.failures[0] if o.failures else
                      next((o.held[t] for t in TARGETS if t in o.held), ""))
             return one_line(first or "something failed", 200) + " - see issues_*.csv"
-        return ""
+        # a written run with missing images says so (2026-11-10)
+        return one_line(next((n for n in o.notes if str(n).startswith("missing images")), ""))
 
     def logger_dir(run) -> str:
         """The DataLogger FOLDER, which is the thing somebody has to go and
@@ -1055,6 +1057,32 @@ def _restore_set_aside(root: Path, run_ids: set) -> tuple[list[str], list[Path]]
     return lines, touched
 
 
+def _missing_images_note(result) -> str:
+    """'missing images: ...' for the run's notes, or '' when it has none.
+    Counted on the Rear camera (else the first one): every camera shares the
+    pulses, so the holes are the same ground."""
+    from .pipeline import _gaps_and_status
+    from .alignment import TRIGGER_SPACING_M
+    als = result.camera_alignments or {}
+    if not als:
+        return ""
+    cam = "Rear" if "Rear" in als else sorted(als)[0]
+    spans = result.estimated_spans.get(cam) if hasattr(result, "estimated_spans") else None
+    gap, status = _gaps_and_status(als[cam], spans)
+    holes = gap[gap > 0]
+    n_est = sum(1 for s in status if s == "estimated")
+    if not len(holes) and not n_est:
+        return ""
+    photos = int(sum(max(1, round((g + TRIGGER_SPACING_M) / TRIGGER_SPACING_M) - 1)
+                     for g in holes))
+    text = (f"missing images: {len(holes)} hole(s), {holes.sum():.1f} m with no "
+            f"photo (about {photos} photos; see MissingPhotos_{result.run.run_id}.csv)"
+            if len(holes) else "missing images: no holes")
+    if n_est:
+        text += f"; {n_est} {cam} photo(s) estimated"
+    return text
+
+
 def _refresh_alignment_csvs(report: BatchReport) -> None:
     """Rewrite each run's alignment CSV now that the images have their final
     names, so every `image_file_final` in it resolves on disk."""
@@ -1365,6 +1393,12 @@ def _process_one(run: disc.RunPaths, write_images: bool, write_gocator: bool,
             # not discovered.
             dest = processed_dir(run.root) / f"{run.run_id}_alignment.csv"
             out.csv_path = str(export_csv(result, dest))
+            # Missing images mode (2026-11-10): say it on the run's own line.
+            # The status stays as it is - SidewalkImageDetection only reads
+            # 'written' runs, and every photo that exists IS written.
+            holes = _missing_images_note(result)
+            if holes:
+                out.notes.append(holes)
         except Exception as exc:
             out.ok = False
             out.status = "flagged"
