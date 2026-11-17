@@ -381,13 +381,15 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
     pr.triggers_sbg_us, trig_wraps, trig_dropped = trig if trig is not None else (None, 0, [])
     pr.triggers_dropped = list(trig_dropped)
     if trig_dropped:
-        # Missing images mode: a loose encoder wire (20261031.101107)
+        # Missing images mode: bad SBG pulse entries around a standstill
         report.add(
             "format.event_a.backwards", "Pulses stamped backwards", Severity.WARN,
             f"{len(trig_dropped)} camera pulse(s) are stamped earlier than the pulse "
             f"before them (data rows {', '.join(str(i + 1) for i in trig_dropped[:8])}"
-            f"{' ...' if len(trig_dropped) > 8 else ''}) - passed over. This is the "
-            "mark of the encoder losing power; expect missing images in this run",
+            f"{' ...' if len(trig_dropped) > 8 else ''}) - bad SBG log entries, no "
+            "photo was taken for them, passed over. They come with the SBG's "
+            "distance trigger stalling after a standstill, so expect holes with no "
+            "photos in this run",
             dropped_rows=[int(i) for i in trig_dropped])
     pr.utc = attempt("format.utc_time", "utcTime.txt", disc.KEY_UTC_TIME, UtcTable.parse)
     if pr.triggers_sbg_us is not None and pr.utc is not None:

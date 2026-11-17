@@ -18,17 +18,22 @@ that took it, so the job is to find the right pulse for every photo.
 The missing photos themselves can't be recovered or tagged. The camera never
 took them.
 
-## What a loose encoder power wire does
+## What goes wrong in the pulses
 
-Found on 20261031.101107 and 20261101.093228.
+Found on 20261031.101107 and 20261101.093228. First thought to be a loose
+encoder power wire; on 2026-11-17 it looked more like the SBG's own distance
+trigger stalling after a standstill (Derek's SBG support case, Apogee-D
+000061421, firmware 6.2.677 until 2026-11-05). The cause doesn't change what
+the app does.
 
-1. **Hole:** no pulses while the power is off, so no photos. 101107 has
-   holes of 6.7 m, 6.9 m and 17.5 m, plus some 1-2 m ones.
+1. **Hole:** no pulses for several metres after a standstill while the van
+   moves, so no photos. 101107 has holes of 6.7 m, 2.6 m and 17.5 m, plus
+   some 1-2 m ones.
 2. **Pulses too close together:** some only 5 ms apart, and in 093228 also
    81 that are 0.05-0.13 s apart. The camera can't take a photo that fast,
    so these pulses get no photo.
-3. **Bad time:** about once per power drop, a pulse is stamped 4-10 s earlier
-   than the one before it. It took no photo.
+3. **Bad time:** around a stop, 1-15 entries are stamped seconds earlier
+   than the one before them. They took no photo.
 4. **ACS reports it wrong:** it names photos by counting them, so its
    QC_Video.csv puts the shortfall at the end of the run. The count is about
    right, but the place is wrong.
@@ -110,4 +115,14 @@ Runs with none of these are processed exactly as now.
 ## In the field
 
 The collection-checker app could flag backwards pulse times and holes the
-same day, so a loose wire is found before a whole day is collected.
+same day, so a stalling trigger is found before a whole day is collected.
+
+## Update 2026-11-17 (Batch 6/7, 50 SBG loggers Oct 22 - Nov 3)
+
+49 of 50 had backwards entries. The limit is now 2% of the pulses or 5,
+whichever is more (was 1%): 20261027.090833 (2 of 184) and 20261030.092846
+(16 of 1108, one block) now process; 20261030.100722 (1011 of 42417, about
+100 pulses a second for 78 min) is still refused as broken. The photo counts
+fit the cleaning on every run checked (exactly, or within 1 on 092846 and
+162920), and the buggy's QCDATA check found no photos at the backwards
+blocks.

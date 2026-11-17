@@ -31,7 +31,7 @@ TRAILING_ROWS_IGNORED = 2
 # count them (see ImageSet.n_set_aside).
 BEFORE_DIR = "BeforeCollection"
 # Missing images mode (Derek, 2026-11-10): photos taken while the van stood
-# still - a loose encoder wire fires pulses at a standstill, so two or three
+# still - the SBG fires pulses at a standstill, so two or three
 # pictures of the same spot - are filed here. Still the run's images, counted
 # like BeforeCollection.
 DUPLICATES_DIR = "Duplicates"
@@ -127,13 +127,17 @@ def unwrap_sbg_us(ts) -> tuple[np.ndarray, int]:
     return ts + wraps.astype(np.int64) * SBG_CLOCK_WRAP_US, int(wraps[-1])
 
 
-# Missing images mode (Derek, 2026-11-10). A loose encoder power wire makes
-# the SBG stamp about one pulse per power drop 4-10 s EARLIER than the one
-# before it (20261031.101107: 2 of 1370, 20261101.093228: 3 of 3041). Those
-# pulses took no photo: dropping them made 101107's count and every camera-log
-# check point fit. More than this share going backwards is not a loose wire
-# but a broken file, and is still refused.
-BACKWARD_PULSES_MAX_FRAC = 0.01
+# Missing images mode (Derek, 2026-11-10). Around a standstill the SBG
+# (firmware 6.2.677, Oct 22 - Nov 3) logs bad pulse entries: a 5 ms burst,
+# then 1-15 pulses stamped seconds EARLIER than the one before
+# (20261031.101107: 2 of 1370; 20261030.092846: 16 of 1108 in one block).
+# They took no photo: dropping them made the photo counts fit (exactly on
+# 101107, 20261027.090833, .151148, 20261030.160501) and the buggy's QCDATA
+# check shows no photos at those times. More than this many going backwards
+# is a broken file and is still refused (20261030.100722: 1011 of 42417,
+# pulses ~9 ms apart for 78 min).
+BACKWARD_PULSES_MAX_FRAC = 0.02
+BACKWARD_PULSES_MIN_ALLOWED = 5
 
 
 def parse_event_triggers(path: Path, with_wraps: bool = False,
@@ -158,11 +162,13 @@ def parse_event_triggers(path: Path, with_wraps: bool = False,
                 continue
             keep.append(i)
             last = v
-        if len(dropped) > max(1, BACKWARD_PULSES_MAX_FRAC * len(ts)):
+        if len(dropped) > max(BACKWARD_PULSES_MIN_ALLOWED,
+                              BACKWARD_PULSES_MAX_FRAC * len(ts)):
             raise ParseError(path, f"trigger timestamps not strictly increasing: "
                                    f"{len(dropped)} of {len(ts)} pulses go backwards "
-                                   f"(first near data row {dropped[0]}) - too many for "
-                                   "a loose encoder wire; the file looks broken")
+                                   f"(first near data row {dropped[0]}) - far more than "
+                                   "the SBG's usual bad entries at a standstill; the "
+                                   "file looks broken")
         ts = ts[keep]
     if len(ts) >= 2 and not np.all(np.diff(ts) > 0):
         bad = int(np.argmin(np.diff(ts) > 0)) + 1

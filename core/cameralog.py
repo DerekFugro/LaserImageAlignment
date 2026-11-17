@@ -251,7 +251,7 @@ def fit_frames(frames: list, trig_utc: np.ndarray) -> OffsetResult | None:
 
 
 # --- Missing images mode (Derek, 2026-11-10) ---------------------------------
-# A loose encoder power wire (20261101.093228) made the SBG send pulses the
+# Around standstills the SBG (20261101.093228) sent pulses the
 # camera never photographed - too close together - beyond what the 0.13 s
 # rule catches. One k then no longer fits the whole run: the camera log said
 # photos 100-600 came from pulse n+0, 700-1100 from n+5, 1200+ from n+6. The

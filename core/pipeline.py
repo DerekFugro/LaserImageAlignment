@@ -231,7 +231,7 @@ def process_run(run: disc.RunPaths) -> RunResult:
                         f"align.camera.{cam_name}.duplicates",
                         f"Camera '{cam_name}' duplicate photos", Severity.WARN,
                         f"{len(dups)} photo(s) of the same spot as the photo before them "
-                        "(the van standing still while the loose encoder fired pulses; "
+                        "(the van standing still while the SBG fired pulses; "
                         f"checked on the {judge} pictures) - given that photo's GPS and "
                         "moved to Duplicates/ by the batch",
                         photos=[al.images.files[j] for j in sorted(dups)])

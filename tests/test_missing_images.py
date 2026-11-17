@@ -1,6 +1,6 @@
 """Missing images mode (Derek, 2026-11-10).
 
-A loose encoder power wire (20261031.101107, 20261101.093228): holes with no
+Bad SBG pulse logs around standstills (20261031.101107, 20261101.093228): holes with no
 pulses, pulses too close for the camera, about one pulse per power drop
 stamped seconds BACKWARDS, and - in 093228 - pulses the camera missed that
 only the camera log (a line every 100th photo) can place."""
@@ -40,7 +40,7 @@ class TestBackwardsPulses:
         p = tmp_path / "eventOutA.txt"
         rng = np.random.default_rng(1)
         _write(p, rng.integers(1, 10**9, 300).tolist())
-        with pytest.raises(ParseError, match="too many"):
+        with pytest.raises(ParseError, match="looks broken"):
             parse_event_triggers(p, drop_backwards=True)
 
 
@@ -195,3 +195,37 @@ def test_row_follows_rear_by_pulse():
     al.match.trigger_for_image = np.array([-1, 5, 6, 7])
     dups = _duplicates_by_pulse(al, {6: 5})       # Rear: pulse 6's photo repeats pulse 5's
     assert dups == {2: 1} and al.lat_deg[2] == al.lat_deg[1]
+
+
+class TestBackwardsLimit:
+    """2% of the pulses, or 5, whichever is more (Batch 6/7, 2026-11-17)."""
+
+    def _ts(self, n, back_at):
+        good = [1_000_000 + 500_000 * k for k in range(n)]
+        out = []
+        for i, v in enumerate(good):
+            out.append(v)
+            if i in back_at:
+                out.append(v - 3_000_000)
+        return out
+
+    def test_short_run_two_at_the_end(self, tmp_path):
+        # 20261027.090833: 2 of 184, refused under the old 1% limit
+        p = tmp_path / "eventOutA.txt"
+        _write(p, self._ts(182, {179, 180}))
+        ts, _, dropped = parse_event_triggers(p, drop_backwards=True)
+        assert len(dropped) == 2 and len(ts) == 182
+
+    def test_a_block_of_sixteen(self, tmp_path):
+        # 20261030.092846: 16 of 1108
+        p = tmp_path / "eventOutA.txt"
+        _write(p, self._ts(1092, set(range(850, 866))))
+        ts, _, dropped = parse_event_triggers(p, drop_backwards=True)
+        assert len(dropped) == 16 and len(ts) == 1092
+
+    def test_over_two_percent_refused(self, tmp_path):
+        # 20261030.100722: 1011 of 42417 (2.4%) - kept as a smaller copy
+        p = tmp_path / "eventOutA.txt"
+        _write(p, self._ts(976, set(range(100, 1000, 40))))   # 23 of 999 = 2.3%
+        with pytest.raises(ParseError, match="looks broken"):
+            parse_event_triggers(p, drop_backwards=True)
