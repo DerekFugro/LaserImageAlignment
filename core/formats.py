@@ -128,33 +128,82 @@ def unwrap_sbg_us(ts) -> tuple[np.ndarray, int]:
 
 
 # Missing images mode (Derek, 2026-11-10). Around a standstill the SBG
-# (firmware 6.2.677, Oct 22 - Nov 3) logs bad pulse entries: a 5 ms burst,
-# then 1-15 pulses stamped seconds EARLIER than the one before
-# (20261031.101107: 2 of 1370; 20261030.092846: 16 of 1108 in one block).
-# They took no photo: dropping them made the photo counts fit (exactly on
-# 101107, 20261027.090833, .151148, 20261030.160501) and the buggy's QCDATA
-# check shows no photos at those times. More than this many going backwards
-# is a broken file and is still refused (20261030.100722: 1011 of 42417,
-# pulses ~9 ms apart for 78 min).
+# (firmware 6.2.677, Oct 22 - Nov 3) logs pulses in eventOutA.txt stamped
+# seconds EARLIER than the one before (20261031.101107: 2 of 1370;
+# 20261030.092846: 16 of 1108). Only the TIME is wrong: the SBG's echo of the
+# same pulse, eventInA.txt (same row), is never out of order (97 loggers,
+# 2026-11-17) and sits a steady 0.1-0.7 ms after eventOutA. Of 93 such rows,
+# the echo puts 80 inside a 5 ms burst (too soon for the camera - no photo)
+# and 13 as a normal pulse 0.3-5.5 s after the one before (photographed, e.g.
+# 092846 row 1, 2.6 s). So the echo time is used (minus that steady lag) and
+# the pulse is kept; the 0.13 s rule then passes over the burst ones. Without
+# an echo that fits (missing, different row count) the pulse is dropped.
+# More than this many going backwards is a broken file and is still refused
+# (20261030.100722: 1011 of 42417, ~100 pulses a second for its whole 7
+# minutes, and an echo with 5 rows fewer).
 BACKWARD_PULSES_MAX_FRAC = 0.02
 BACKWARD_PULSES_MIN_ALLOWED = 5
+ECHO_FILENAME = "eventInA.txt"
+
+
+def _echo_times(path: Path, n_rows: int):
+    """eventInA.txt beside `path`, unwrapped, or None when it is missing,
+    unreadable, has a different number of rows, or is itself out of order."""
+    p = Path(path).with_name(ECHO_FILENAME)
+    if not p.is_file():
+        return None
+    try:
+        _, data = _read_sbg_table(p)
+    except ParseError:
+        return None
+    if len(data) != n_rows:
+        return None
+    echo, _ = unwrap_sbg_us(data[:, 0].astype(np.int64))
+    if len(echo) >= 2 and not np.all(np.diff(echo) > 0):
+        return None
+    return echo
 
 
 def parse_event_triggers(path: Path, with_wraps: bool = False,
-                         drop_backwards: bool = False):
+                         drop_backwards: bool = False, with_repaired: bool = False):
     """eventOutA.txt -> strictly increasing SBG timestamps in microseconds (int64).
 
     The clock roll-over is undone (see SBG_CLOCK_WRAP_US). with_wraps=True
     returns (ts, n_wraps) so a report can say a roll-over was corrected.
 
-    drop_backwards=True passes over a pulse stamped at or before the last one
-    kept (see BACKWARD_PULSES_MAX_FRAC) and returns (ts, n_wraps, dropped),
-    `dropped` being the 0-based data rows passed over.
+    drop_backwards=True mends a pulse stamped at or before the one before it
+    from its echo (eventInA.txt, see BACKWARD_PULSES_MAX_FRAC), or passes it
+    over when there is no echo to use, and returns (ts, n_wraps, dropped) -
+    `dropped` being the 0-based data rows passed over. with_repaired=True adds
+    a 4th item: the rows whose time was taken from the echo.
     """
     names, data = _read_sbg_table(path)
     ts, n_wraps = unwrap_sbg_us(data[:, 0].astype(np.int64))
     dropped: list = []
+    repaired: list = []
     if drop_backwards and len(ts) >= 2 and not np.all(np.diff(ts) > 0):
+        back, last = [], None
+        for i, v in enumerate(ts):
+            if last is not None and v <= last:
+                back.append(i)
+                continue
+            last = v
+        if len(back) > max(BACKWARD_PULSES_MIN_ALLOWED,
+                           BACKWARD_PULSES_MAX_FRAC * len(ts)):
+            raise ParseError(path, f"trigger timestamps not strictly increasing: "
+                                   f"{len(back)} of {len(ts)} pulses go backwards "
+                                   f"(first near data row {back[0]}) - far more than "
+                                   "the SBG's usual bad entries at a standstill; the "
+                                   "file looks broken")
+        echo = _echo_times(path, len(ts))
+        if echo is not None:
+            good = np.setdiff1d(np.arange(len(ts)), back)
+            lag = int(np.median(echo[good] - ts[good]))
+            mended = ts.copy()
+            mended[back] = echo[back] - lag
+            ts = mended
+            repaired = list(back)
+        # anything still out of order (no echo, or an echo that doesn't fit)
         keep, last = [], None
         for i, v in enumerate(ts):
             if last is not None and v <= last:
@@ -162,19 +211,13 @@ def parse_event_triggers(path: Path, with_wraps: bool = False,
                 continue
             keep.append(i)
             last = v
-        if len(dropped) > max(BACKWARD_PULSES_MIN_ALLOWED,
-                              BACKWARD_PULSES_MAX_FRAC * len(ts)):
-            raise ParseError(path, f"trigger timestamps not strictly increasing: "
-                                   f"{len(dropped)} of {len(ts)} pulses go backwards "
-                                   f"(first near data row {dropped[0]}) - far more than "
-                                   "the SBG's usual bad entries at a standstill; the "
-                                   "file looks broken")
+        repaired = [i for i in repaired if i not in set(dropped)]
         ts = ts[keep]
     if len(ts) >= 2 and not np.all(np.diff(ts) > 0):
         bad = int(np.argmin(np.diff(ts) > 0)) + 1
         raise ParseError(path, f"trigger timestamps not strictly increasing near data row {bad}")
     if drop_backwards:
-        return ts, n_wraps, dropped
+        return (ts, n_wraps, dropped, repaired) if with_repaired else (ts, n_wraps, dropped)
     return (ts, n_wraps) if with_wraps else ts
 
 

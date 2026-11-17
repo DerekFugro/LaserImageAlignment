@@ -210,7 +210,8 @@ def process_run(run: disc.RunPaths) -> RunResult:
                 blocks=(TARGET_IMAGES, TARGET_CSV), arm_m=arm)
 
         # Missing images mode: photos taken while the van stood still
-        if parsed.triggers_dropped or any(c.check_id.endswith(".missing_images")
+        if parsed.triggers_dropped or getattr(parsed, "triggers_repaired", None) \
+                or any(c.check_id.endswith(".missing_images")
                                           for c in report.checks):
             # The picture check needs a camera looking DOWN: ROW looks ahead,
             # and its far scenery barely moves even when the van does (15-94 px
@@ -348,12 +349,14 @@ def _pairing(run, parsed, triggers, report, usable=None):
                                          all_utc, r)
             if fixed is None and row is not None and usable is not None \
                     and len(usable) < n_trg:
-                # The 0.13 s rule passed over a pulse the camera DID
-                # photograph (20261030.092846: one 0.094 s after the one
-                # before, ~40 pulses in) - the log then has a photo with no
-                # pulse and the fix above can't work. Start again from every
-                # pulse and let the camera log say which took no photo.
-                # Kept only under the same test: every log line fits one k.
+                # The log shows a photo with no pulse, so the 0.13 s rule may
+                # have passed over a pulse the camera DID photograph. Start
+                # again from every pulse and let the camera log say which took
+                # no photo; kept only under the same test (every log line fits
+                # one k). A guarded fallback: it was built for 20261030.092846,
+                # but there the real cause was a pulse dropped for its wrong
+                # eventOutA time - now mended from its echo (formats.py), and
+                # the rule then fits. No real run needs it since.
                 every = np.arange(n_trg)
                 r_all = cameralog.decide(log_path, run.run_id, cam_name, all_utc,
                                          delay, n_photos)
@@ -426,7 +429,8 @@ def _pairing(run, parsed, triggers, report, usable=None):
             **({} if log_err is None else {"camera_log_err_s": round(log_err, 4)}))
     # The too-soon row says its pulses "got no photo". Where the camera log
     # showed a camera DID photograph some of them, say so on that row too,
-    # so it can't be read alone and believed (20261030.092846).
+    # so it can't be read alone and believed (only with the guarded
+    # fallback above - no real run since the echo fix).
     if rule_set_aside:
         row = next((c for c in report.checks
                     if c.check_id == "align.trigger_too_soon"), None)

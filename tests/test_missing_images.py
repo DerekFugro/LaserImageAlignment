@@ -232,7 +232,10 @@ class TestBackwardsLimit:
 
 
 class TestTooSoonRuleSetAside:
-    """20261030.092846: the camera photographed a pulse 0.094 s after the one
+    """The guarded fallback in _pairing (built for 20261030.092846, whose real
+    cause turned out to be a pulse with a wrong eventOutA time - see
+    TestEchoMendsBackwardPulses). Made-up data: the camera photographed a
+    pulse 0.094 s after the one
     before (the 0.13 s rule had passed it over), while other pulses 0.10-0.136 s
     apart got no photo. The camera log decides which."""
 
@@ -375,7 +378,7 @@ class TestRowsTellOneStory:
     def test_too_soon_row_names_the_photographed_pulse(self, monkeypatch):
         import core.pipeline as pl
         from core.qc import QCReport
-        # rebuild 092846's shape, but let the pipeline add the too-soon row
+        # the made-up shape above, but let the pipeline add the too-soon row
         rng = np.random.default_rng(3)
         x, out, short = 100.0, [], None
         missed = []
@@ -432,3 +435,57 @@ class TestRowsTellOneStory:
         rows = [c for c in report.checks if c.check_id == "align.camera.Rear.missing_images"]
         assert len(rows) == 1 and "did not agree afterwards" in rows[0].message
         assert _passed_over(report, "Rear") == 0 and by_cam == {} and spans == {}
+
+
+class TestEchoMendsBackwardPulses:
+    """A pulse stamped backwards in eventOutA has a good time in its echo,
+    eventInA.txt (same row, ~0.1 ms later). 20261030.092846 row 1: eventOutA
+    7.5 s early, echo 2.6 s after the pulse before - a normal, photographed
+    pulse. Dropping it shifted photos 2-43 by one pulse."""
+
+    def _files(self, tmp_path, out, echo):
+        _write(tmp_path / "eventOutA.txt", out)
+        if echo is not None:
+            _write(tmp_path / "eventInA.txt", echo)
+        return tmp_path / "eventOutA.txt"
+
+    def test_normal_pulse_kept_with_echo_time(self, tmp_path):
+        good = [1_000_000 + 2_000_000 * k for k in range(20)]
+        out = list(good)
+        out[1] = good[0] - 5_000_000                 # 092846 row 1's shape
+        echo = [v + 109 for v in good]
+        ts, _, dropped, repaired = parse_event_triggers(
+            self._files(tmp_path, out, echo), drop_backwards=True, with_repaired=True)
+        assert dropped == [] and repaired == [1]
+        assert ts.tolist() == good                   # echo minus its steady lag
+
+    def test_burst_pulse_kept_for_the_too_soon_rule(self, tmp_path):
+        from core.alignment import camera_trigger_indices
+        good = [1_000_000 + 500_000 * k for k in range(10)]
+        burst = [good[4] + 5_000 * j for j in range(1, 4)]        # 5 ms burst
+        true = sorted(good + burst)
+        out = list(true)
+        out[6] = true[5] - 3_000_000                 # one burst pulse stamped backwards
+        echo = [v + 400 for v in true]
+        ts, _, dropped, repaired = parse_event_triggers(
+            self._files(tmp_path, out, echo), drop_backwards=True, with_repaired=True)
+        assert repaired == [6] and ts.tolist() == true
+        usable, skipped = camera_trigger_indices(ts / 1e6)
+        assert [i for i, _ in skipped] == [5, 6, 7]  # the burst gets no photo
+
+    def test_no_echo_drops_it(self, tmp_path):
+        good = [1_000_000 + 2_000_000 * k for k in range(20)]
+        out = list(good)
+        out[1] = good[0] - 5_000_000
+        ts, _, dropped, repaired = parse_event_triggers(
+            self._files(tmp_path, out, None), drop_backwards=True, with_repaired=True)
+        assert dropped == [1] and repaired == []
+
+    def test_echo_with_other_row_count_not_used(self, tmp_path):
+        good = [1_000_000 + 2_000_000 * k for k in range(20)]
+        out = list(good)
+        out[1] = good[0] - 5_000_000
+        ts, _, dropped, repaired = parse_event_triggers(
+            self._files(tmp_path, out, [v + 109 for v in good[:-1]]),
+            drop_backwards=True, with_repaired=True)
+        assert dropped == [1] and repaired == []

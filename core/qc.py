@@ -316,6 +316,7 @@ class ParsedRun:
     cameras: dict = None                      # every camera: name -> ImageSet
     triggers_sbg_us: np.ndarray | None = None
     triggers_dropped: list | None = None      # data rows passed over (stamped backwards)
+    triggers_repaired: list | None = None     # data rows timed from their echo instead
     utc: UtcTable | None = None
     dmi: DmiTable | None = None
     nav: NavTable | None = None
@@ -377,20 +378,33 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
             report.add(f"format.camera.{cam_name}", f"Camera '{cam_name}' scan",
                        Severity.FAIL, str(exc))
     trig = attempt("format.event_a", "eventOutA.txt", disc.KEY_EVENT_A,
-                   lambda p: parse_event_triggers(p, drop_backwards=True))
-    pr.triggers_sbg_us, trig_wraps, trig_dropped = trig if trig is not None else (None, 0, [])
+                   lambda p: parse_event_triggers(p, drop_backwards=True,
+                                                  with_repaired=True))
+    (pr.triggers_sbg_us, trig_wraps, trig_dropped,
+     trig_repaired) = trig if trig is not None else (None, 0, [], [])
     pr.triggers_dropped = list(trig_dropped)
-    if trig_dropped:
-        # Missing images mode: bad SBG pulse entries around a standstill
+    pr.triggers_repaired = list(trig_repaired)
+    if trig_dropped or trig_repaired:
+        # Missing images mode: pulses the SBG stamped with a wrong time
+        # around a standstill (see formats.BACKWARD_PULSES_MAX_FRAC)
+        bad = sorted(list(trig_dropped) + list(trig_repaired))
+        shown = ", ".join(str(i + 1) for i in bad[:8]) + (" ..." if len(bad) > 8 else "")
+        what = []
+        if trig_repaired:
+            what.append(f"{len(trig_repaired)} given the time of their echo "
+                        "(eventInA.txt), which is in order")
+        if trig_dropped:
+            what.append(f"{len(trig_dropped)} passed over (no echo to use)")
         report.add(
             "format.event_a.backwards", "Pulses stamped backwards", Severity.WARN,
-            f"{len(trig_dropped)} camera pulse(s) are stamped earlier than the pulse "
-            f"before them (data rows {', '.join(str(i + 1) for i in trig_dropped[:8])}"
-            f"{' ...' if len(trig_dropped) > 8 else ''}) - bad SBG log entries, no "
-            "photo was taken for them, passed over. They come with the SBG's "
-            "distance trigger stalling after a standstill, so expect holes with no "
-            "photos in this run",
-            dropped_rows=[int(i) for i in trig_dropped])
+            f"{len(bad)} camera pulse(s) are stamped earlier than the pulse before "
+            f"them (data rows {shown}) - a wrong time in the SBG's pulse log: "
+            + "; ".join(what) + ". Echo times inside a 5 ms burst are then passed "
+            "over as too soon for the camera. They come with the SBG's distance "
+            "trigger stalling after a standstill, so expect holes with no photos "
+            "in this run",
+            dropped_rows=[int(i) for i in trig_dropped],
+            repaired_rows=[int(i) for i in trig_repaired])
     pr.utc = attempt("format.utc_time", "utcTime.txt", disc.KEY_UTC_TIME, UtcTable.parse)
     if pr.triggers_sbg_us is not None and pr.utc is not None:
         # each file was unwrapped from its own first row; put the triggers on
@@ -718,7 +732,8 @@ def _passed_over(report: QCReport, cam: str, with_too_soon: bool = True) -> int:
     """How many pulses took no photo for this camera, from the pipeline's
     rows: the 0.13 s too-soon rule (align.trigger_too_soon) plus what missing
     images mode found (align.camera.<cam>.missing_images). When that camera
-    set the too-soon rule aside (from_every_pulse - 20261030.092846), its
+    set the too-soon rule aside (from_every_pulse - pipeline's guarded
+    fallback, no real run since the echo fix), its
     passed_over list already counts from every pulse and holds them all."""
     mi = next((x.values for x in report.checks
                if x.check_id == f"align.camera.{cam}.missing_images"
@@ -796,7 +811,7 @@ def check_content(pr: ParsedRun, report: QCReport,
     # other one photographed (20261101.093228: Rear one more than ROW).
     # Pulses that took no photo are counted the same way for every camera
     # (too-soon rule + missing images mode), so a camera that set the too-soon
-    # rule aside (20261030.092846) compares fairly with one that did not.
+    # rule aside (pipeline's fallback) compares fairly with one that did not.
     every = any(x.values.get("from_every_pulse") for x in report.checks
                 if x.check_id.endswith(".missing_images"))
     passed_cam = {c: _passed_over(report, c, with_too_soon=every) for c in counts}

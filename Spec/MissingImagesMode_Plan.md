@@ -32,8 +32,9 @@ the app does.
 2. **Pulses too close together:** some only 5 ms apart, and in 093228 also
    81 that are 0.05-0.13 s apart. The camera can't take a photo that fast,
    so these pulses get no photo.
-3. **Bad time:** around a stop, 1-15 entries are stamped seconds earlier
-   than the one before them. They took no photo.
+3. **Bad time:** around a stop, 1-16 entries are stamped seconds earlier
+   than the one before them. Only the time is wrong - see the 2026-11-17
+   echo update below.
 4. **ACS reports it wrong:** it names photos by counting them, so its
    QC_Video.csv puts the shortfall at the end of the run. The count is about
    right, but the place is wrong.
@@ -127,3 +128,19 @@ whichever is more (was 1%): 20261027.090833 (2 of 184) and 20261030.092846
 fit the cleaning on every run checked (exactly, or within 1 on 092846 and
 162920), and the buggy's QCDATA check found no photos at the backwards
 blocks.
+
+## Update 2026-11-17 (later): backwards pulses mended from their echo
+
+QCDATA times these pulses from eventInA.txt, the SBG's echo of each pulse
+(same row). Checked on 97 loggers: the echo is never out of order and sits
+a steady 0.1-0.7 ms after eventOutA. Of 93 backwards entries, the echo puts
+80 inside a 5 ms burst (no photo either way) and 13 as normal pulses
+0.3-5.5 s after the one before - real, photographed pulses that dropping
+had removed, shifting the photos after them by one pulse. On 092846 that
+was row 1 (2.6 s gap): photos 2-43 were one pulse off. The app now takes
+the echo time; the 0.13 s rule handles the burst ones. 092846 then needs
+only 1 pulse passed over (0.136 s gap, photos 301-399) and the count fits
+exactly (1,068 pulses + start-up frame = 1,069 photos, as QCDATA found).
+The earlier reading that the camera photographed a pulse 0.094 s after
+the one before was wrong; the 'rule set aside' fallback stays, guarded,
+but no real run needs it.
