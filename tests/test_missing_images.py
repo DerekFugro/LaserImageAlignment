@@ -367,3 +367,68 @@ class TestCameraLogMustMakeSense:
         # no confident start (cameras ready after the first pulses): k=+3 is normal
         row = self._row(monkeypatch, 3)
         assert row.severity.name == "PASS"
+
+
+class TestRowsTellOneStory:
+    """Report rows must not contradict each other (QC review 2026-11-17)."""
+
+    def test_too_soon_row_names_the_photographed_pulse(self, monkeypatch):
+        import core.pipeline as pl
+        from core.qc import QCReport
+        # rebuild 092846's shape, but let the pipeline add the too-soon row
+        rng = np.random.default_rng(3)
+        x, out, short = 100.0, [], None
+        missed = []
+        for i in range(700):
+            x += 0.45 + 0.1 * rng.random()
+            out.append(x)
+            if i == 39:
+                x += 0.094
+                out.append(x)
+                short = len(out) - 1
+            if i in (250, 480):
+                x += 0.1 if i == 250 else 0.136
+                out.append(x)
+                missed.append(len(out) - 1)
+        ts = np.array(out)
+        real = np.delete(np.arange(len(ts)), missed)
+        frames = [(o, float(ts[real[o - 2]]) - 500.0)
+                  for o in range(100, 10_000, 100) if o - 2 < len(real)]
+        monkeypatch.setattr(cl, "load", lambda p: cl.CameraLog(frames={("R1", "Rear"): frames}))
+        monkeypatch.setattr(pl.cal, "trigger_delay_s", lambda arms, c: 0.0)
+        run = type("Run", (), {"run_id": "R1", "get": lambda self, k: "x.log"})()
+        parsed = type("P", (), {"cameras": {"Rear": [0] * (len(real) + 1)},
+                                "lever_arms": None})()
+        trg = type("T", (), {"utc_s": ts})()
+        report = QCReport("R1")
+        usable = pl._camera_usable_triggers(parsed, trg, report)
+        pl._pairing(run, parsed, trg, report, usable)
+        row = next(c for c in report.checks if c.check_id == "align.trigger_too_soon")
+        assert "EXCEPT Rear" in row.message and f"trigger {short + 1}" in row.message
+        assert row.values["photographed_by_camera"] == {"Rear": [short]}
+
+    def test_a_rejected_fix_leaves_no_passed_over(self, monkeypatch):
+        import core.pipeline as pl
+        from core.qc import QCReport, _passed_over
+        t = _pulses(300)
+        calls = []
+
+        def decide(*a, **kw):
+            calls.append(1)
+            if len(calls) == 2:        # after the fix: the log disagrees
+                return cl.OffsetResult(0, "camera log", True, "camera log: n+0")
+            return cl.OffsetResult(-1, "assumed", False, "pairing NOT confirmed")
+        monkeypatch.setattr(cl, "decide", decide)
+        monkeypatch.setattr(cl, "load", lambda p: cl.CameraLog())
+        monkeypatch.setattr(pl.cal, "trigger_delay_s", lambda arms, c: 0.0)
+        monkeypatch.setattr(pl, "_missing_images", lambda *a, **kw: (
+            (np.delete(np.arange(len(t)), [50, 60]), -1, [(2, 99)]),
+            ("2 pulse(s) took no photo", {"passed_over": [50, 60], "spans": [(2, 99)]})))
+        run = type("Run", (), {"run_id": "R1", "get": lambda self, k: "x.log"})()
+        parsed = type("P", (), {"cameras": {"Rear": [0] * 290}, "lever_arms": None})()
+        trg = type("T", (), {"utc_s": t})()
+        report = QCReport("R1")
+        lags, by_cam, spans = pl._pairing(run, parsed, trg, report, None)
+        rows = [c for c in report.checks if c.check_id == "align.camera.Rear.missing_images"]
+        assert len(rows) == 1 and "did not agree afterwards" in rows[0].message
+        assert _passed_over(report, "Rear") == 0 and by_cam == {} and spans == {}

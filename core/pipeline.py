@@ -330,6 +330,7 @@ def _pairing(run, parsed, triggers, report, usable=None):
     from . import cameralog
     log_path = run.get(disc.KEY_CAMERA_LOG)
     lags, usable_by_cam, spans_by_cam = {}, {}, {}
+    rule_set_aside = {}          # camera -> pulses the too-soon rule got wrong
     n_trg = len(triggers.utc_s)
     for cam_name, cam_images in (parsed.cameras or {}).items():
         delay = cal.trigger_delay_s(parsed.lever_arms, cam_name)
@@ -361,7 +362,11 @@ def _pairing(run, parsed, triggers, report, usable=None):
                     rule_skipped=np.setdiff1d(every, usable))
                 if fixed_all is not None:
                     fixed, row = fixed_all, row_all
-            if row is not None:
+            # A fix's row waits for the check below: if the fix is thrown
+            # out, its passed_over list must not reach the report, or the
+            # count checks (qc._passed_over) subtract pulses that were not
+            # passed over after all.
+            if row is not None and fixed is None:
                 report.add(f"align.camera.{cam_name}.missing_images",
                            f"Camera '{cam_name}' missing images", Severity.WARN,
                            row[0], **row[1])
@@ -384,6 +389,12 @@ def _pairing(run, parsed, triggers, report, usable=None):
                 base = np.arange(n_trg) if usable is None else np.asarray(usable)
                 r = cameralog.decide(log_path, run.run_id, cam_name,
                                      np.asarray(triggers.utc_s)[base], delay, n_photos)
+            else:
+                report.add(f"align.camera.{cam_name}.missing_images",
+                           f"Camera '{cam_name}' missing images", Severity.WARN,
+                           row[0], **row[1])
+                if row[1].get("from_every_pulse"):
+                    rule_set_aside[cam_name] = row[1].get("photographed_too_soon", [])
         lags[cam_name] = -int(r.k)
         ok = r.confident and "COUNT DOES NOT FIT" not in r.message
         message = r.message
@@ -413,6 +424,21 @@ def _pairing(run, parsed, triggers, report, usable=None):
             k=int(r.k), method=r.method, confident=bool(r.confident),
             camera_log=str(log_path) if log_path else "",
             **({} if log_err is None else {"camera_log_err_s": round(log_err, 4)}))
+    # The too-soon row says its pulses "got no photo". Where the camera log
+    # showed a camera DID photograph some of them, say so on that row too,
+    # so it can't be read alone and believed (20261030.092846).
+    if rule_set_aside:
+        row = next((c for c in report.checks
+                    if c.check_id == "align.trigger_too_soon"), None)
+        if row is not None:
+            row.message += " - EXCEPT " + "; ".join(
+                f"{cam}: the camera log shows it photographed "
+                + ", ".join(f"trigger {i + 1}" for i in pulses[:5])
+                + (f" and {len(pulses) - 5} more" if len(pulses) > 5 else "")
+                + f" (see align.camera.{cam}.missing_images)"
+                for cam, pulses in sorted(rule_set_aside.items()))
+            row.values["photographed_by_camera"] = {
+                c: [int(i) for i in p] for c, p in rule_set_aside.items()}
     # different photo counts per camera are judged in qc.check_content
     # (content.camera_counts), which reads these rows
     return lags, usable_by_cam, spans_by_cam
