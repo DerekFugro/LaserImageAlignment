@@ -119,7 +119,7 @@ same day, so a stalling trigger is found before a whole day is collected.
 
 ## Update 2026-11-17 (Batch 6/7, 50 SBG loggers Oct 22 - Nov 3)
 
-49 of 50 had backwards entries. The limit is now 2% of the pulses or 5,
+All 50 had backwards entries (11 only in the last rows, 39 also mid-run). The limit is now 2% of the pulses or 5,
 whichever is more (was 1%): 20261027.090833 (2 of 184) and 20261030.092846
 (16 of 1108, one block) now process; 20261030.100722 (1011 of 42417, about
 100 pulses a second for 78 min) is still refused as broken. The photo counts
