@@ -122,7 +122,8 @@ same day, so a stalling trigger is found before a whole day is collected.
 All 50 had backwards entries (11 only in the last rows, 39 also mid-run). The limit is now 2% of the pulses or 5,
 whichever is more (was 1%): 20261027.090833 (2 of 184) and 20261030.092846
 (16 of 1108, one block) now process; 20261030.100722 (1011 of 42417, about
-100 pulses a second for 78 min) is still refused as broken. The photo counts
+100 pulses a second through the whole 7-minute run, ~2,500 photos for
+274 m) is still refused as broken. The photo counts
 fit the cleaning on every run checked (exactly, or within 1 on 092846 and
 162920), and the buggy's QCDATA check found no photos at the backwards
 blocks.

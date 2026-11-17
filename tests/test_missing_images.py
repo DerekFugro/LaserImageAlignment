@@ -229,3 +229,60 @@ class TestBackwardsLimit:
         _write(p, self._ts(976, set(range(100, 1000, 40))))   # 23 of 999 = 2.3%
         with pytest.raises(ParseError, match="looks broken"):
             parse_event_triggers(p, drop_backwards=True)
+
+
+class TestTooSoonRuleSetAside:
+    """20261030.092846: the camera photographed a pulse 0.094 s after the one
+    before (the 0.13 s rule had passed it over), while other pulses 0.10-0.136 s
+    apart got no photo. The camera log decides which."""
+
+    def _run(self, monkeypatch, photographed_short):
+        import core.pipeline as pl
+        from core.alignment import camera_trigger_indices
+        from core.qc import QCReport
+        rng = np.random.default_rng(3)
+        t, out, short, missed = 100.0, [], None, []
+        for i in range(700):
+            t += 0.45 + 0.1 * rng.random()
+            out.append(t)
+            if i == 39:                       # a pulse 0.094 s later
+                t += 0.094
+                out.append(t)
+                short = len(out) - 1
+            if i in (250, 480):               # pulses 0.100 / 0.136 s later,
+                t += 0.1 if i == 250 else 0.136   # no photo (092846: 159, 371)
+                out.append(t)
+                missed.append(len(out) - 1)
+        t = np.array(out)
+        no_photo = list(missed) + ([] if photographed_short else [short])
+        real = np.delete(np.arange(len(t)), no_photo)
+        frames = [(o, float(t[real[o - 2]]) - 500.0)
+                  for o in range(100, 10_000, 100) if o - 2 < len(real)]
+        log = cl.CameraLog(frames={("R1", "Rear"): frames})
+        monkeypatch.setattr(cl, "load", lambda p: log)
+        monkeypatch.setattr(pl.cal, "trigger_delay_s", lambda arms, c: 0.0)
+        run = type("Run", (), {"run_id": "R1", "get": lambda self, k: "x.log"})()
+        parsed = type("P", (), {"cameras": {"Rear": list(range(len(real) + 1))},
+                                "lever_arms": None})()
+        trg = type("T", (), {"utc_s": t})()
+        usable, _ = camera_trigger_indices(t)
+        report = QCReport("R1")
+        lags, by_cam, spans = pl._pairing(run, parsed, trg, report, usable)
+        return lags, by_cam, report, short, missed, usable, len(t)
+
+    def test_camera_log_overrules_the_rule(self, monkeypatch):
+        lags, by_cam, report, short, missed, usable, n = self._run(monkeypatch, True)
+        assert short not in usable                     # the rule passed it over
+        assert lags == {"Rear": 1}
+        assert sorted(set(range(n)) - set(by_cam["Rear"].tolist())) == sorted(missed)
+        row = next(c for c in report.checks if c.check_id == "align.camera.Rear.missing_images")
+        assert row.values["from_every_pulse"] and short in row.values["photographed_too_soon"]
+        pairing = next(c for c in report.checks if c.check_id == "align.camera.Rear.pairing")
+        assert pairing.values["method"] == "camera log" and pairing.values["k"] == -1
+
+    def test_rule_right_nothing_changes(self, monkeypatch):
+        # the short pulse really got no photo: the rule fits, no retry needed
+        lags, by_cam, report, short, missed, usable, n = self._run(monkeypatch, False)
+        assert lags == {"Rear": 1}
+        assert not any(c.values.get("from_every_pulse") for c in report.checks
+                       if c.check_id.endswith(".missing_images"))

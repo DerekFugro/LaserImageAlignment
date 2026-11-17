@@ -342,8 +342,29 @@ def _pairing(run, parsed, triggers, report, usable=None):
                              delay, n_photos)
         fixed = None
         if not (r.confident and r.method == "camera log"):
-            fixed = _missing_images(log_path, run.run_id, cam_name, base,
-                                    np.asarray(triggers.utc_s), r, report)
+            all_utc = np.asarray(triggers.utc_s)
+            fixed, row = _missing_images(log_path, run.run_id, cam_name, base,
+                                         all_utc, r)
+            if fixed is None and row is not None and usable is not None \
+                    and len(usable) < n_trg:
+                # The 0.13 s rule passed over a pulse the camera DID
+                # photograph (20261030.092846: one 0.094 s after the one
+                # before, ~40 pulses in) - the log then has a photo with no
+                # pulse and the fix above can't work. Start again from every
+                # pulse and let the camera log say which took no photo.
+                # Kept only under the same test: every log line fits one k.
+                every = np.arange(n_trg)
+                r_all = cameralog.decide(log_path, run.run_id, cam_name, all_utc,
+                                         delay, n_photos)
+                fixed_all, row_all = _missing_images(
+                    log_path, run.run_id, cam_name, every, all_utc, r_all,
+                    rule_skipped=np.setdiff1d(every, usable))
+                if fixed_all is not None:
+                    fixed, row = fixed_all, row_all
+            if row is not None:
+                report.add(f"align.camera.{cam_name}.missing_images",
+                           f"Camera '{cam_name}' missing images", Severity.WARN,
+                           row[0], **row[1])
         if fixed is not None:
             base, k, spans = fixed
             usable_by_cam[cam_name] = base
@@ -375,65 +396,73 @@ def _pairing(run, parsed, triggers, report, usable=None):
     return lags, usable_by_cam, spans_by_cam
 
 
-def _missing_images(log_path, run_id, cam_name, base, all_utc, r, report):
+def _missing_images(log_path, run_id, cam_name, base, all_utc, r, rule_skipped=None):
     """Missing images mode (Derek, 2026-11-10): when one pairing does not fit
     the whole run, follow the camera log's every-100th-photo lines through the
     pulses, pass over the pulses that took no photo, and say which photos were
     therefore worked out rather than proven.
 
-    Returns (usable trigger indices, k, [(first, last) photo ordinal]) or None
-    when there is nothing to fix or it can't be fixed safely."""
+    `rule_skipped`: set when `base` is every pulse because the 0.13 s rule got
+    it wrong (see _pairing) - the pulses that rule had passed over.
+
+    Returns (fixed, row). fixed = (usable trigger indices, k, [(first, last)
+    photo ordinal]) or None when there is nothing to fix or it can't be fixed
+    safely. row = (message, values) for the WARN report row, or None when
+    there is nothing to say; the caller adds it."""
     from . import cameralog
     if log_path is None:
-        return None
+        return None, None
     try:
         frames = cameralog.load(Path(log_path)).frames.get((run_id, cam_name), [])
     except OSError:
-        return None
+        return None, None
     if len(frames) < 2:
-        return None
+        return None, None
     trig = all_utc[base]
     seq = cameralog.follow_frames(frames, trig)
     if seq is None:
-        return None
+        return None, None
     # the pairing at the start of the run: the camera start when the log has
     # one, else the start-up-frame rule (photo n = pulse n-1) that every
     # normal run follows. It closes the stretch before the first log line.
     k_start = int(r.k) if r.method in ("camera start", "assumed") and r.k is not None else None
     ks = {k for _, k in seq}
     if len(ks) == 1 and (k_start is None or seq[0][1] == k_start):
-        return None                      # one pairing fits: nothing missing
+        return None, None                # one pairing fits: nothing missing
     found = cameralog.extra_pulses(seq, trig, k_start)
     if found is None:
-        report.add(f"align.camera.{cam_name}.missing_images",
-                   f"Camera '{cam_name}' missing images", Severity.WARN,
-                   "the camera log shows the pairing changing in a way passing over "
-                   "pulses can't explain (a photo with no pulse) - pairing left as it "
-                   f"was; check this run. Log frames (photo, k): {seq}")
-        return None
+        return None, ("the camera log shows the pairing changing in a way passing "
+                      "over pulses can't explain (a photo with no pulse) - pairing "
+                      f"left as it was; check this run. Log frames (photo, k): {seq}", {})
     drop, spans = found
     if not drop:
-        return None
+        return None, None
     k = k_start if k_start is not None else seq[0][1]
     new = np.delete(np.asarray(base), drop)
-    if cameralog.follow_frames(frames, all_utc[new]) is None or \
-            {kk for _, kk in cameralog.follow_frames(frames, all_utc[new])} != {k}:
-        report.add(f"align.camera.{cam_name}.missing_images",
-                   f"Camera '{cam_name}' missing images", Severity.WARN,
-                   f"{len(drop)} pulse(s) look like they took no photo, but the camera "
-                   "log does not fit one pairing without them - pairing left as it "
-                   "was; check this run")
-        return None
+    after = cameralog.follow_frames(frames, all_utc[new])
+    if after is None or {kk for _, kk in after} != {k}:
+        return None, (f"{len(drop)} pulse(s) look like they took no photo, but the "
+                      "camera log does not fit one pairing without them - pairing "
+                      "left as it was; check this run", {})
     where = ", ".join(f"photos {a}-{b}" for a, b in spans)
-    report.add(f"align.camera.{cam_name}.missing_images",
-               f"Camera '{cam_name}' missing images", Severity.WARN,
-               f"{len(drop)} pulse(s) took no photo ({where}) - found from the camera "
-               "log and passed over; every camera-log check point now fits one "
-               "pairing. The photos in those stretches are 'estimated' in the "
-               "alignment table (the exact pulse inside the stretch is the "
-               "likeliest one, not proven)",
-               passed_over=[int(np.asarray(base)[i]) for i in drop], spans=spans)
-    return new, int(k), spans
+    passed = [int(np.asarray(base)[i]) for i in drop]
+    msg = (f"{len(drop)} pulse(s) took no photo ({where}) - found from the camera "
+           "log and passed over; every camera-log check point now fits one "
+           "pairing. The photos in those stretches are 'estimated' in the "
+           "alignment table (the exact pulse inside the stretch is the "
+           "likeliest one, not proven)")
+    values = dict(passed_over=passed, spans=spans)
+    if rule_skipped is not None:
+        kept = sorted(set(int(i) for i in rule_skipped) - set(passed))
+        shown = ", ".join(f"pulse {i + 1} ({all_utc[i] - all_utc[i - 1]:.3f} s after "
+                          f"pulse {i})" for i in kept[:5] if i > 0)
+        more = f" and {len(kept) - 5} more" if len(kept) > 5 else ""
+        msg += (". The 0.13 s too-soon rule was set aside for this camera: the "
+                f"camera log shows it photographed {len(kept)} pulse(s) that rule "
+                f"had passed over ({shown}{more}), so the pulses with no photo "
+                "were worked out from every pulse instead")
+        values.update(from_every_pulse=True, photographed_too_soon=kept)
+    return (new, int(k), spans), (msg, values)
 
 
 def _recover_pre_collection_triggers(parsed, report) -> tuple[np.ndarray, int]:

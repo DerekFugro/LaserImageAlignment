@@ -714,6 +714,22 @@ def pairing_offsets(report: QCReport) -> dict:
     return out
 
 
+def _passed_over(report: QCReport, cam: str, with_too_soon: bool = True) -> int:
+    """How many pulses took no photo for this camera, from the pipeline's
+    rows: the 0.13 s too-soon rule (align.trigger_too_soon) plus what missing
+    images mode found (align.camera.<cam>.missing_images). When that camera
+    set the too-soon rule aside (from_every_pulse - 20261030.092846), its
+    passed_over list already counts from every pulse and holds them all."""
+    mi = next((x.values for x in report.checks
+               if x.check_id == f"align.camera.{cam}.missing_images"
+               and "passed_over" in (x.values or {})), {})
+    n = len(mi.get("passed_over", []))
+    if with_too_soon and not mi.get("from_every_pulse"):
+        n += sum(len(x.values.get("skipped", [])) for x in report.checks
+                 if x.check_id == "align.trigger_too_soon")
+    return n
+
+
 def match_summary(report: QCReport, match, n_images: int) -> str:
     """The one-line pairing for a run summary. "match k=-5" was photos minus
     triggers, which read like the pairing and was not (094844: k=-5 while
@@ -778,9 +794,12 @@ def check_content(pr: ParsedRun, report: QCReport,
     pairing = pairing_offsets(report)
     # Missing images mode: a camera can also have passed over pulses the
     # other one photographed (20261101.093228: Rear one more than ROW).
-    passed_cam = {c: len(next((x.values.get("passed_over", []) for x in report.checks
-                               if x.check_id == f"align.camera.{c}.missing_images"), []))
-                  for c in counts}
+    # Pulses that took no photo are counted the same way for every camera
+    # (too-soon rule + missing images mode), so a camera that set the too-soon
+    # rule aside (20261030.092846) compares fairly with one that did not.
+    every = any(x.values.get("from_every_pulse") for x in report.checks
+                if x.check_id.endswith(".missing_images"))
+    passed_cam = {c: _passed_over(report, c, with_too_soon=every) for c in counts}
     explained = (len(set(counts.values())) > 1 and set(counts) <= set(pairing)
                  and len({counts[c] + pairing[c] + passed_cam[c] for c in counts}) == 1)
     if explained:
@@ -865,12 +884,7 @@ def check_content(pr: ParsedRun, report: QCReport,
         n_trg = len(pr.triggers_sbg_us)
         # pulses already shown to have taken no photo (too soon for the
         # camera, or found by missing images mode) are not "left at the end"
-        passed = 0
-        for c in report.checks:
-            if c.check_id == "align.trigger_too_soon":
-                passed += len(c.values.get("skipped", []))
-            elif c.check_id == f"align.camera.{primary}.missing_images":
-                passed += len(c.values.get("passed_over", []))
+        passed = _passed_over(report, primary)
         n_trg -= passed
         extra = n_img - (n_trg - k)
         ok = -3 <= extra <= 0
