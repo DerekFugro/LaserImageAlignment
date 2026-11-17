@@ -250,6 +250,26 @@ def fit_frames(frames: list, trig_utc: np.ndarray) -> OffsetResult | None:
         f"(best {best * 1000:.0f} ms, next {second * 1000:.0f} ms)")
 
 
+def frame_error_s(frames: list, trig_utc: np.ndarray, k: int) -> float | None:
+    """How badly the camera-log lines fit one given pairing (photo n <- pulse
+    n+k): the worst miss between the log's photo-to-photo times and the pulse
+    times, in seconds. None when the log has fewer than two lines for this
+    camera or the pairing runs off the pulse list.
+
+    Used to check a pairing decided some other way (the camera start): on
+    20261030.162920 the start said n-1 while the log fitted no pairing -
+    392 ms at best - and the row still read PASS (Derek, 2026-11-17)."""
+    if len(frames) < 2 or k is None:
+        return None
+    ords = np.array([f[0] for f in frames], dtype=np.int64)
+    cam_t = np.array([f[1] for f in frames], dtype=np.float64)
+    idx = ords + int(k) - 1
+    t = np.asarray(trig_utc, dtype=np.float64)
+    if idx.min() < 0 or idx.max() >= len(t):
+        return None
+    return float(np.abs(np.diff(t[idx]) - np.diff(cam_t)).max())
+
+
 # --- Missing images mode (Derek, 2026-11-10) ---------------------------------
 # Around standstills the SBG (20261101.093228) sent pulses the
 # camera never photographed - too close together - beyond what the 0.13 s

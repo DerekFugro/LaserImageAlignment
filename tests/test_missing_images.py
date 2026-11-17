@@ -286,3 +286,43 @@ class TestTooSoonRuleSetAside:
         assert lags == {"Rear": 1}
         assert not any(c.values.get("from_every_pulse") for c in report.checks
                        if c.check_id.endswith(".missing_images"))
+
+
+class TestCameraLogMustAgree:
+    """A pairing decided by the camera start is not a PASS when the camera
+    log does not fit it (20261030.162920: start n-1, log 392 ms off)."""
+
+    def test_frame_error(self):
+        t = _pulses(500)
+        fr = _frames(lambda o: t[o - 2] if o - 2 < len(t) else None)   # n-1
+        assert cl.frame_error_s(fr, t, -1) < 1e-9
+        assert cl.frame_error_s(fr, t, 0) > cl.FIT_MAX_ERR_S
+        assert cl.frame_error_s(fr[:1], t, -1) is None
+
+    def _pairing(self, monkeypatch, k_true):
+        import core.pipeline as pl
+        from core.qc import QCReport
+        t = _pulses(500)
+        fr = _frames(lambda o: t[o - 1 + k_true] if 0 <= o - 1 + k_true < len(t) else None)
+        log = cl.CameraLog(frames={("R1", "Rear"): fr})
+        monkeypatch.setattr(cl, "load", lambda p: log)
+        monkeypatch.setattr(pl.cal, "trigger_delay_s", lambda arms, c: 0.0)
+        # the camera start "proves" n-1, whatever the log says
+        monkeypatch.setattr(cl, "decide", lambda *a, **kw: cl.OffsetResult(
+            -1, "camera start", True, "cameras were ready 2.0 s before - photo n = trigger n-1"))
+        monkeypatch.setattr(pl, "_missing_images", lambda *a, **kw: (None, None))
+        run = type("Run", (), {"run_id": "R1", "get": lambda self, k: "x.log"})()
+        parsed = type("P", (), {"cameras": {"Rear": [0] * 450}, "lever_arms": None})()
+        trg = type("T", (), {"utc_s": t})()
+        report = QCReport("R1")
+        pl._pairing(run, parsed, trg, report, None)
+        return next(c for c in report.checks if c.check_id == "align.camera.Rear.pairing")
+
+    def test_log_agrees_stays_pass(self, monkeypatch):
+        row = self._pairing(monkeypatch, -1)
+        assert row.severity.name == "PASS" and "does not agree" not in row.message
+
+    def test_log_disagrees_is_warn(self, monkeypatch):
+        row = self._pairing(monkeypatch, 0)
+        assert row.severity.name == "WARN" and "does not agree" in row.message
+        assert row.values["camera_log_err_s"] > 0.015

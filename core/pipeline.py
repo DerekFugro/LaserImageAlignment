@@ -386,14 +386,42 @@ def _pairing(run, parsed, triggers, report, usable=None):
                                      np.asarray(triggers.utc_s)[base], delay, n_photos)
         lags[cam_name] = -int(r.k)
         ok = r.confident and "COUNT DOES NOT FIT" not in r.message
+        message = r.message
+        log_err = None
+        if r.method != "camera log":
+            # Decided another way (camera start, or assumed): a camera log
+            # that does not fit that pairing means it is not proven, so it
+            # can never be a PASS (20261030.162920: start n-1, log 392 ms off).
+            log_err = _log_error_at(log_path, run.run_id, cam_name,
+                                    np.asarray(triggers.utc_s)[base], int(r.k))
+            if log_err is not None and log_err > cameralog.FIT_MAX_ERR_S:
+                ok = False
+                message += (f" - BUT the camera log does not agree: at this pairing its "
+                            f"every-100th-photo times miss the pulses by up to "
+                            f"{log_err * 1000:.0f} ms (a fit is under "
+                            f"{cameralog.FIT_MAX_ERR_S * 1000:.0f} ms); check this run")
         report.add(
             f"align.camera.{cam_name}.pairing", f"Camera '{cam_name}' photo-trigger pairing",
-            Severity.PASS if ok else Severity.WARN, r.message,
+            Severity.PASS if ok else Severity.WARN, message,
             k=int(r.k), method=r.method, confident=bool(r.confident),
-            camera_log=str(log_path) if log_path else "")
+            camera_log=str(log_path) if log_path else "",
+            **({} if log_err is None else {"camera_log_err_s": round(log_err, 4)}))
     # different photo counts per camera are judged in qc.check_content
     # (content.camera_counts), which reads these rows
     return lags, usable_by_cam, spans_by_cam
+
+
+def _log_error_at(log_path, run_id, cam_name, trig_utc, k):
+    """cameralog.frame_error_s for this run and camera, or None when there is
+    no camera log or it has fewer than two lines for this camera."""
+    from . import cameralog
+    if log_path is None:
+        return None
+    try:
+        frames = cameralog.load(Path(log_path)).frames.get((run_id, cam_name), [])
+    except OSError:
+        return None
+    return cameralog.frame_error_s(frames, trig_utc, k)
 
 
 def _missing_images(log_path, run_id, cam_name, base, all_utc, r, rule_skipped=None):
