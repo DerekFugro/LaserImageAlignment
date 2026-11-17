@@ -400,6 +400,13 @@ def _pairing(run, parsed, triggers, report, usable=None):
                             f"every-100th-photo times miss the pulses by up to "
                             f"{log_err * 1000:.0f} ms (a fit is under "
                             f"{cameralog.FIT_MAX_ERR_S * 1000:.0f} ms); check this run")
+        else:
+            # Decided by the camera log: it must also make sense physically.
+            why = _log_pairing_doubt(log_path, run.run_id, int(r.k),
+                                     np.asarray(triggers.utc_s)[base], delay)
+            if why:
+                ok = False
+                message += f" - BUT {why}; check this run"
         report.add(
             f"align.camera.{cam_name}.pairing", f"Camera '{cam_name}' photo-trigger pairing",
             Severity.PASS if ok else Severity.WARN, message,
@@ -409,6 +416,34 @@ def _pairing(run, parsed, triggers, report, usable=None):
     # different photo counts per camera are judged in qc.check_content
     # (content.camera_counts), which reads these rows
     return lags, usable_by_cam, spans_by_cam
+
+
+def _log_pairing_doubt(log_path, run_id, k, trig_utc, delay):
+    """Why a pairing the camera log fitted can't be right, or "" when nothing
+    speaks against it (Derek, 2026-11-17).
+
+    - k below -1: photos 1 and 2 (or more) with no pulse. The camera makes
+      ONE start-up frame (see PAIRING_MODE "head"), never two.
+    - the cameras were clearly ready before the first pulse (camera start,
+      1 s margin) - then no pulse was missed at the start and photo n must
+      be pulse n-1; any other k means a pulse with no photo, or a photo with
+      no pulse, before the log's first line that one k can't show."""
+    from . import cameralog
+    if k < -1:
+        return (f"that means {-k} photos before the first pulse, and the camera "
+                "makes only one start-up frame")
+    if log_path is None:
+        return ""
+    try:
+        log = cameralog.load(Path(log_path))
+    except OSError:
+        return ""
+    s = cameralog.from_start(log, trig_utc, delay, cameralog.run_start_local(run_id))
+    if s is not None and s.confident and s.k is not None and int(s.k) != k:
+        return (f"the camera start says photo n = trigger n{int(s.k):+d} "
+                f"({s.message.split(' - ')[0]}), so something before the log's "
+                "first line does not add up")
+    return ""
 
 
 def _log_error_at(log_path, run_id, cam_name, trig_utc, k):

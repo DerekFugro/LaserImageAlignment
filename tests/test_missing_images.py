@@ -326,3 +326,44 @@ class TestCameraLogMustAgree:
         row = self._pairing(monkeypatch, 0)
         assert row.severity.name == "WARN" and "does not agree" in row.message
         assert row.values["camera_log_err_s"] > 0.015
+
+
+class TestCameraLogMustMakeSense:
+    """A camera-log PASS that can't be right physically is a WARN."""
+
+    def _row(self, monkeypatch, k_log, start_k=None):
+        import core.pipeline as pl
+        from core.qc import QCReport
+        t = _pulses(500)
+        fr = _frames(lambda o: t[o - 1 + k_log] if 0 <= o - 1 + k_log < len(t) else None)
+        monkeypatch.setattr(cl, "load", lambda p: cl.CameraLog(frames={("R1", "Rear"): fr}))
+        monkeypatch.setattr(pl.cal, "trigger_delay_s", lambda arms, c: 0.0)
+        monkeypatch.setattr(cl, "from_start", lambda *a: None if start_k is None else
+                            cl.OffsetResult(start_k, "camera start", True,
+                                            "cameras were ready 2.0 s before the first "
+                                            "trigger's picture - photo n = trigger n-1"))
+        run = type("Run", (), {"run_id": "R1", "get": lambda self, k: "x.log"})()
+        parsed = type("P", (), {"cameras": {"Rear": [0] * 450}, "lever_arms": None})()
+        trg = type("T", (), {"utc_s": t})()
+        report = QCReport("R1")
+        pl._pairing(run, parsed, trg, report, None)
+        return next(c for c in report.checks if c.check_id == "align.camera.Rear.pairing")
+
+    def test_normal(self, monkeypatch):
+        row = self._row(monkeypatch, -1, start_k=-1)
+        assert row.values["method"] == "camera log" and row.severity.name == "PASS"
+
+    def test_two_startup_frames_is_warn(self, monkeypatch):
+        row = self._row(monkeypatch, -2)
+        assert row.values["method"] == "camera log" and row.values["k"] == -2
+        assert row.severity.name == "WARN" and "start-up frame" in row.message
+
+    def test_start_disagrees_is_warn(self, monkeypatch):
+        row = self._row(monkeypatch, 0, start_k=-1)
+        assert row.values["method"] == "camera log" and row.severity.name == "WARN"
+        assert "camera start says" in row.message
+
+    def test_moving_start_is_fine(self, monkeypatch):
+        # no confident start (cameras ready after the first pulses): k=+3 is normal
+        row = self._row(monkeypatch, 3)
+        assert row.severity.name == "PASS"
