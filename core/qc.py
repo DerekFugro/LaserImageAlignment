@@ -327,6 +327,35 @@ class ParsedRun:
     lever_arms: dict | None = None            # {name: (x, y, z)} from the lever-arm file
 
 
+def _triggers_from_elsewhere(pr: "ParsedRun", run: disc.RunPaths, report: QCReport) -> None:
+    """eventOutA.txt unusable: take the triggers from the echo or from
+    Qinertia's Events-output.txt (core/triggersource.py). On success the
+    FAIL rows for the unusable files become INFO - the data is good, so the
+    run is not flagged (Derek, 2026-11-19) - and one INFO row says where the
+    triggers came from. On failure the FAILs stand and a row says why."""
+    from .triggersource import fallback_triggers
+    ft, why = fallback_triggers(run, pr.utc)
+    if ft is None:
+        report.add("format.event_a.source", "Trigger source", Severity.INFO,
+                   f"eventOutA.txt unusable and no other source worked: {why}")
+        return
+    pr.triggers_sbg_us = ft.sbg_us
+    pr.triggers_dropped = list(ft.dropped)
+    pr.triggers_repaired = list(ft.repaired)
+    replaced = {"format.event_a": ft.note, "presence.event_a": ft.note}
+    if ft.utc_made_up:
+        pr.utc = ft.utc
+        why_utc = "trigger times are taken straight from the UTC column of Events-output.txt"
+        replaced["format.utc_time"] = replaced["presence.utc_time"] = why_utc
+    for c in report.checks:
+        if c.check_id in replaced and c.severity is Severity.FAIL:
+            c.severity, c.blocks = Severity.INFO, None
+            c.message += f" - not needed: {replaced[c.check_id]}"
+    report.add("format.event_a.source", "Trigger source", Severity.INFO, ft.note,
+               source=ft.source, utc_made_up=bool(ft.utc_made_up),
+               n_triggers=int(len(ft.sbg_us)))
+
+
 def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
     from .calibration import CameraCalibration, load_lever_arms_file
     from .events import EventTable
@@ -410,6 +439,9 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
         # each file was unwrapped from its own first row; put the triggers on
         # the clock table's count of roll-overs before anything joins them
         pr.triggers_sbg_us = np.round(pr.utc.align_wraps(pr.triggers_sbg_us)).astype(np.int64)
+    if pr.triggers_sbg_us is None and (run.get(disc.KEY_EVENT_A) is not None
+                                       or run.get(disc.KEY_EVENTS_EXPORT) is not None):
+        _triggers_from_elsewhere(pr, run, report)
     n_wraps = max(trig_wraps, pr.utc.n_wraps if pr.utc is not None else 0)
     if n_wraps:
         report.add(

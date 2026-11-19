@@ -150,6 +150,9 @@ def preflight(root: Path, calibrations_dir: Path | None = None,
             continue
 
         for key in run.missing():
+            if key in (disc.KEY_EVENT_A, disc.KEY_UTC_TIME) \
+                    and run.get(disc.KEY_EVENTS_EXPORT) is not None:
+                continue        # Events-output.txt can stand in - checked below
             if key not in disc.OPTIONAL_KEYS:
                 pf.missing.append(MissingInput(run.run_id, key,
                                                disc.KEY_DESCRIPTIONS.get(key, key)))
@@ -171,13 +174,11 @@ def preflight(root: Path, calibrations_dir: Path | None = None,
 
         # coverage: does the export span this run's trigger and profile times?
         try:
-            utc = UtcTable.parse(run.get(disc.KEY_UTC_TIME))
+            utc, trig = _trigger_utc_for_preflight(run)
             navp = run.get(disc.KEY_NAV_EXPORT)
             if navp not in nav_cache:
                 nav_cache[navp] = NavTable.parse(navp, anchor_utc_date=utc.utc_date)
             nav = nav_cache[navp]
-            trig = utc.sbg_to_utc(parse_event_triggers(run.get(disc.KEY_EVENT_A),
-                                                       drop_backwards=True)[0])
             need_lo, need_hi = float(trig.min()), float(trig.max())
             for gp in pf.gocator_files:
                 span = _gocator_ptp_span(Path(gp))
@@ -205,6 +206,31 @@ def preflight(root: Path, calibrations_dir: Path | None = None,
             pf.reason = f"could not verify coverage: {exc}"
         report.runs.append(pf)
     return report
+
+
+def _trigger_utc_for_preflight(run):
+    """(clock table, trigger UTC times) for the coverage check - from the
+    DataLogger as always, or, when eventOutA.txt / utcTime.txt are unusable,
+    from the same stand-ins the run will use (core/triggersource.py). Raises
+    ValueError saying why when there is none."""
+    from .formats import ParseError, UtcTable, parse_event_triggers
+    from .triggersource import fallback_triggers
+    utc = None
+    if run.get(disc.KEY_UTC_TIME) is not None:
+        try:
+            utc = UtcTable.parse(run.get(disc.KEY_UTC_TIME))
+        except ParseError:
+            utc = None
+    if utc is not None and run.get(disc.KEY_EVENT_A) is not None:
+        try:
+            return utc, utc.sbg_to_utc(parse_event_triggers(
+                run.get(disc.KEY_EVENT_A), drop_backwards=True)[0])
+        except ParseError:
+            pass
+    ft, why = fallback_triggers(run, utc)
+    if ft is None:
+        raise ValueError(f"eventOutA.txt / utcTime.txt unusable and no stand-in: {why}")
+    return ft.utc, ft.utc.sbg_to_utc(ft.sbg_us)
 
 
 @dataclass
