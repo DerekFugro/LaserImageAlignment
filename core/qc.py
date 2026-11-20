@@ -104,6 +104,7 @@ NOISE_MAX_DEFECT_M = 0.5
 # well under one 0.750 m trigger interval, so it can never eat real travel
 # that carries an image.
 STALL_M = 0.10
+REALTIME_VS_EXPORT_WARN_PCT = 5.0   # content.realtime_vs_export: INFO up to this
 
 # Biggest gap between consecutive triggers before it is a hole in the
 # collection rather than ordinary spacing jitter. Triggers are nominally
@@ -1072,11 +1073,17 @@ def check_content(pr: ParsedRun, report: QCReport,
             stalled = win & (pr.dmi.dist_m - d0 <= STALL_M)
             a_mov = float(pr.dmi.epoch_s[stalled][-1]) if np.any(stalled) else a
             parked_s = a_mov - a
-            if b - a_mov > 5.0:
+            nav_covers = float(pr.nav.epoch_s[0]) <= a_mov and b <= float(pr.nav.epoch_s[-1])
+            if b - a_mov > 5.0 and nav_covers:
                 sbg = float(pr.dmi.dist_at(b) - pr.dmi.dist_at(a_mov))
                 export = float(pr.nav.dist_at(b) - pr.nav.dist_at(a_mov))
                 dev = abs(sbg - export) / max(abs(export), 1e-9) * 100
-                sev = Severity.PASS if dev <= 2.0 else Severity.WARN
+                # 2-5% apart is the realtime solution being the realtime
+                # solution: 20 of 36 runs once the DMI file was read again
+                # (2026-11-20), and nothing is placed from it. Over 5% is
+                # worth a look (a wrong session or a bad export).
+                sev = Severity.PASS if dev <= 2.0 else (
+                    Severity.INFO if dev <= REALTIME_VS_EXPORT_WARN_PCT else Severity.WARN)
                 held = (f", ignoring {parked_s:.0f} s parked at the start"
                         if parked_s > 1.0 else "")
                 report.add(
@@ -1399,7 +1406,10 @@ def check_content(pr: ParsedRun, report: QCReport,
         # NOTE: image-resolution vs calibration is enforced at display time —
         # Undistorter.undistort() raises on a mismatch and the GUI surfaces it.
         # Checking it here would mean decoding a JPEG header inside QC.
-        sev = Severity.PASS if cal.rms_reprojection_error <= 1.0 else Severity.WARN
+        # INFO, never WARN (Derek, 2026-11-20): it is one number for the whole
+        # lens calibration, not something about this run, and it does not move
+        # any photo - a WARN on every run only buried the real warnings.
+        sev = Severity.INFO
         report.add(
             "content.calibration_rms", "Calibration RMS", sev,
             f"RMS reprojection {cal.rms_reprojection_error:.3f} px "

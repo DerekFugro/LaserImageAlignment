@@ -297,6 +297,14 @@ class UtcTable:
         return datetime.fromtimestamp(mid, tz=timezone.utc)
 
 
+# Any time step back near the start is the clock change: usually ~1 h, but on
+# 28 runs only 0.01-0.03 s (the time-of-week column jumps ~28 h at the same
+# row), which still put two rows out of order and refused the file.
+DMI_LEAD_JUMP_S = 0.0
+DMI_LEAD_MAX_ROWS = 500     # ...and only near the start (500 rows = 10 s at 50 Hz)
+DMI_LEAD_MAX_FRAC = 0.10
+
+
 @dataclass
 class DmiTable:
     """Travelled distance & speed vs UTC epoch time, from 'DmiStationEx *.csv'.
@@ -326,20 +334,44 @@ class DmiTable:
             cols = [c.strip() for c in header]
             if len(cols) < 3 or not cols[0].startswith("Dmi") or not cols[2].startswith("UTC TS"):
                 raise ParseError(path, f"unexpected header {cols!r}: expected 'Dmi (m), Speed (m/s), UTC TS (s), ...'", 1)
-            for i, row in enumerate(reader, start=2):
+            rows = [r for r in reader]
+            last = max((k for k, r in enumerate(rows) if r and "".join(r).strip()), default=-1)
+            for k, row in enumerate(rows):
+                i = k + 2
                 if not row or not "".join(row).strip():
                     continue
-                if len(row) < 3:
-                    raise ParseError(path, f"expected >=3 fields, got {len(row)}", i)
                 try:
-                    d.append(float(row[0]))
-                    v.append(float(row[1]))
-                    t.append(float(row[2]))
-                except ValueError as exc:
-                    raise ParseError(path, f"non-numeric value: {exc}", i)
+                    if len(row) < 3:
+                        raise ParseError(path, f"expected >=3 fields, got {len(row)}", i)
+                    try:
+                        dd, vv, tt = float(row[0]), float(row[1]), float(row[2])
+                    except ValueError as exc:
+                        raise ParseError(path, f"non-numeric value: {exc}", i)
+                except ParseError:
+                    if k == last:
+                        break       # a last line cut short in the copy (2 of 423 files)
+                    raise
+                d.append(dd)
+                v.append(vv)
+                t.append(tt)
         if not t:
             raise ParseError(path, "no data rows")
         t_arr, d_arr, v_arr = (np.asarray(x, dtype=np.float64) for x in (t, d, v))
+        # The first rows (up to ~a second of driving) are stamped with the
+        # wrong time: on 20261014.094844 14:48:44, i.e. the run stamp 09:48:44
+        # turned to UTC with +5 h instead of +4 h, while the rest carry the SBG's
+        # GPS time (13:47:55 = utcTime.txt). Sorting by time then sent them to
+        # the end and the distance seemed to fall back by the whole run, so the
+        # file was refused on 334 of 356 runs (BuggyProcessed, 2026-11-20).
+        # In FILE order the distance counts up smoothly: drop the rows before
+        # the last time step back near the start (see DMI_LEAD_JUMP_S).
+        jumps = np.where(np.diff(t_arr) < -DMI_LEAD_JUMP_S)[0]
+        lead = jumps[jumps < max(DMI_LEAD_MAX_ROWS, DMI_LEAD_MAX_FRAC * len(t_arr))]
+        if len(lead):
+            cut = int(lead[-1]) + 1
+            t_arr, d_arr, v_arr = t_arr[cut:], d_arr[cut:], v_arr[cut:]
+            if not len(t_arr):
+                raise ParseError(path, "no data rows after the mis-timed first rows")
         order = np.argsort(t_arr)
         t_arr, d_arr, v_arr = t_arr[order], d_arr[order], v_arr[order]
         keep = np.concatenate(([True], np.diff(t_arr) > 0))  # drop duplicate timestamps

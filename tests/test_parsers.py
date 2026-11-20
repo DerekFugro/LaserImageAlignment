@@ -82,6 +82,30 @@ class TestDmiTable:
         with pytest.raises(ParseError, match="reverses"):
             DmiTable.parse(p)
 
+    def test_first_rows_on_the_wrong_clock_are_dropped(self, tmp_path):
+        # 20261014.094844: the first rows stamped ~1 h late (PC clock, wrong
+        # zone), the rest on GPS time; distance smooth in FILE order
+        hdr = "Dmi (m), Speed (m/s), UTC TS (s), TimeOfWeek (s)\n"
+        early = [f"{0.06 * k:.3f}, 3.0, {3700.0 + 0.02 * k:.3f}, 0\n" for k in range(30)]
+        good = [f"{1.8 + 0.06 * k:.3f}, 3.0, {100.0 + 0.02 * k:.3f}, 0\n" for k in range(200)]
+        p = tmp_path / "DmiStationEx x.csv"
+        p.write_text(hdr + "".join(early + good))
+        dmi = DmiTable.parse(p)
+        assert len(dmi.epoch_s) == 200 and dmi.epoch_s[0] == pytest.approx(100.0)
+        assert dmi.dist_m[0] == pytest.approx(1.8)
+        # and the 0.01 s shape (28 runs): two rows swapped at the clock change
+        early = [f"{0.06 * k:.3f}, 3.0, {100.0 + 0.02 * k:.3f}, 0\n" for k in range(30)]
+        good = [f"{1.8 + 0.06 * k:.3f}, 3.0, {100.0 + 0.02 * 29 - 0.01 + 0.02 * k:.3f}, 0\n"
+                for k in range(200)]
+        p.write_text(hdr + "".join(early + good))
+        assert len(DmiTable.parse(p).epoch_s) == 200
+
+    def test_a_last_line_cut_short_is_ignored(self, tmp_path):
+        p = tmp_path / "DmiStationEx x.csv"
+        p.write_text("Dmi (m), Speed (m/s), UTC TS (s), TimeOfWeek (s)\n"
+                     "1.000, 0.5, 100.0, 0\n1.010, 0.5, 100.02, 0\n1.020, 0.5,")
+        assert len(DmiTable.parse(p).epoch_s) == 2
+
     def test_rejects_wrong_header(self, tmp_path):
         p = tmp_path / "DmiStationEx x.csv"
         p.write_text("a,b,c\n1,2,3\n")
