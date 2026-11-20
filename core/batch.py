@@ -1178,8 +1178,7 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
     names it has and says so in its notes.
     """
     from .daily import find_daily_file, parse_daily
-    from .rename import (DAILY_START_WARN_M, daily_start_miss_m,
-                         move_before_collection, rename_camera_folder,
+    from .rename import (move_before_collection, rename_camera_folder,
                          section_distance_mm)
 
     # THE SAME DAY the runs were picked from. A glob here would measure day
@@ -1216,24 +1215,11 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
         logged, clock = res.parsed.triggers_sbg_us, res.parsed.utc
         if logged is not None and len(logged) and clock is not None:
             start_utc = float(clock.sbg_to_utc(np.asarray(logged[:1]))[0])
-        if res.camera_alignments:
-            any_al = next(iter(res.camera_alignments.values()))
-            miss = daily_start_miss_m(any_al, nav, entry, start_utc)
-            if getattr(entry, "added_by_orchestrator", False):
-                o.notes.append(
-                    "daily start: row added by the orchestrator from this run's own "
-                    "data (not in the crew's Daily) - the Daily-start check proves "
-                    "nothing for it and was not made")
-            elif not entry.has_start_point:
-                o.notes.append(
-                    "daily start: the ACS Daily row has no section-start point "
-                    "(LatBeg/LongBeg blank) - names count from the session start "
-                    "as always; the Daily-start check could not be made")
-            elif np.isfinite(miss) and miss > DAILY_START_WARN_M:
-                o.warnings.append(
-                    f"daily start: the ACS Daily start point is {miss:.1f} m from where "
-                    f"this session started - names count from the session start, so "
-                    f"check this is the right Daily row")
+        # No Daily-start check in the report any more (Derek, 2026-11-20): the
+        # Daily's LatBeg/LongBeg place and name nothing - names count from the
+        # session start - and it warned on 10-12 runs a day at 8-30 m. "If it
+        # does not affect the data, let it go." daily_start_miss_m stays in
+        # core.rename for anyone who wants to look.
         for cam_name, al in sorted(res.camera_alignments.items()):
             # The arm from the RUN'S lever-arm file - the same numbers the
             # EXIF was just written from (parsed once, in parse_all). Until
