@@ -105,6 +105,7 @@ NOISE_MAX_DEFECT_M = 0.5
 # that carries an image.
 STALL_M = 0.10
 REALTIME_VS_EXPORT_WARN_PCT = 5.0   # content.realtime_vs_export: INFO up to this
+UTC_EDGE_OK_S = 2.0                 # content.utc_covers_triggers: silent up to this
 
 # Biggest gap between consecutive triggers before it is a hole in the
 # collection rather than ordinary spacing jitter. Triggers are nominally
@@ -967,12 +968,20 @@ def check_content(pr: ParsedRun, report: QCReport,
                    f"max gap {gap:.2f} s (limit 2 s)", max_gap_s=gap)
         if pr.triggers_sbg_us is not None and len(pr.triggers_sbg_us):
             lo, hi = int(pr.triggers_sbg_us[0]), int(pr.triggers_sbg_us[-1])
-            covered = pr.utc.sbg_us[0] <= lo and hi <= pr.utc.sbg_us[-1]
+            past = max(0.0, (pr.utc.sbg_us[0] - lo) / 1e6, (hi - pr.utc.sbg_us[-1]) / 1e6)
+            # Under a couple of seconds past the 1-per-second table is just the
+            # last pulse falling between rows: the SBG clock is steady, so the
+            # stretch costs microseconds. Not worth a person's time (Derek,
+            # 2026-11-20 - 24 runs of BuggyProcessed, worst 0.82 s). Further
+            # out means the table is cut short (e.g. zero-filled, Oct 19).
             report.add(
                 "content.utc_covers_triggers", "utcTime covers triggers",
-                Severity.PASS if covered else Severity.WARN,
-                "trigger time span inside utcTime table" if covered else
-                "triggers extend past the utcTime table edge (edge extrapolation used)",
+                Severity.PASS if past <= UTC_EDGE_OK_S else Severity.WARN,
+                (f"trigger times inside the utcTime table (or within {past:.2f} s of "
+                 "its edge)") if past <= UTC_EDGE_OK_S else
+                (f"triggers run {past:.1f} s past the utcTime table's edge - the "
+                 "table looks cut short; times out there are extrapolated"),
+                past_edge_s=round(past, 3),
             )
 
     # Ruler checks (along-track distance from the CORRECTED export)

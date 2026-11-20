@@ -83,3 +83,21 @@ def test_an_unreadable_daily_still_keeps_to_its_own_day(tmp_path):
     _run_folders(tmp_path, "20261013.104109", "20261014.094844")
     found = {r.run_id for r in disc.discover_runs(tmp_path, daily_path=gone)}
     assert found == {"20261013.104109"}
+
+
+def test_the_report_names_only_this_day_s_folders(tmp_path):
+    """Each day's report listed ~330 folders of OTHER days as "ignored"
+    (BuggyProcessed). Only this day's unlisted folders matter (Derek,
+    2026-11-20)."""
+    daily = _day(tmp_path, "20261014", [_row("20261014.094844")])
+    _run_folders(tmp_path, "20261013.104109", "20261014.094844", "20261014.092105",
+                 "20261015.090853")
+    (tmp_path / "SBGData" / "261014" / "20261014.092157 DataLogger").mkdir(parents=True)
+    rep = process_collection(tmp_path, daily_path=daily, write_images=False,
+                             write_gocator=False, write_csv=False)
+    assert rep.ignored == ["20261014.092105"]      # not the logger-only .092157
+
+
+def test_a_filled_daily_outside_the_day_folder_knows_its_day(tmp_path):
+    filled = tmp_path / "Processed" / "_orchestrator" / "filled" / "Daily_FILLED_20261014.csv"
+    assert disc._day_of(filled) == "20261014"

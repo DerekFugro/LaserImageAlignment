@@ -510,8 +510,9 @@ class BatchReport:
             ]
         if self.ignored:
             lines[-1:] = [
-                f"ignored: {len(self.ignored)} folder(s) with no row in the ACS "
-                f"Daily file — {', '.join(self.ignored)}",
+                f"ignored: {len(self.ignored)} folder(s) of this day with no row in "
+                f"the ACS Daily file - not processed, check they are not real runs: "
+                f"{', '.join(self.ignored)}",
                 "",
             ]
         if self.rename_error:
@@ -960,6 +961,21 @@ def process_collection(root: Path, calibrations_dir: Path | None = None,
     excluded = disc.excluded_stamps(root, daily_path)
     report.excluded = sorted(on_disk & excluded)
     report.ignored = sorted(on_disk - registered - excluded)
+    # The report is for ONE day: folders of other days are not this batch's
+    # business and are not mentioned at all (Derek, 2026-11-20 - each day's
+    # report listed ~330 other-day folders). A folder of THIS day with no row
+    # in the Daily stays listed: it could be a run nobody processed.
+    from .daily import find_daily_file
+    chosen = find_daily_file(root, daily_path)
+    day = disc._day_of(chosen) if chosen is not None else None
+    if day:
+        report.ignored = [s for s in report.ignored if s.startswith(day)]
+        report.excluded = [s for s in report.excluded if s.startswith(day)]
+    # ...and only folders that hold photos or laser files. An SBG logger
+    # folder on its own is a logger that ran with no collection (all 21 of
+    # Oct 14's unlisted folders) - nothing in it could be a lost run.
+    report.ignored = [s for s in report.ignored
+                      if (root / "Images" / s).is_dir() or (root / "GoCatorData" / s).is_dir()]
     by_id = {r.run_id: r for r in rep_pf.runs}
     for i, run in enumerate(runs):
         if progress:

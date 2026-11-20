@@ -406,11 +406,13 @@ def empty_daily(root: Path, daily_path: Path | None = None) -> Path | None:
 
 
 def _day_of(daily_path: Path | None) -> str | None:
-    """YYYYMMDD of the day folder a chosen Daily file sits in, or None."""
+    """YYYYMMDD a chosen Daily file is for - from its own name, else its
+    folder (the orchestrator's Daily_FILLED_<day>.csv sits outside the day
+    folder) - or None."""
     if daily_path is None:
         return None
-    m = re.fullmatch(r"\d{8}", Path(daily_path).parent.name)
-    return m.group(0) if m else None
+    from .daily import day_of_daily_file
+    return day_of_daily_file(Path(daily_path)) or None
 
 
 def discover_runs(root: Path, calibrations_dir: Path | None = None,
