@@ -205,7 +205,7 @@ class TestGocatorEncoderMessage:
         enc[-1] -= 6528                       # the real 20260817.180042 signature
         checks = run_checks(gocator_l=gocator(enc))
         c = checks["content.gocator_L_encoder"]
-        assert c.severity is Severity.WARN
+        assert c.severity is Severity.INFO     # nothing moves (2026-11-20)
         assert c.values["terminal_only"] is True
         assert c.values["n_drops"] == 1
         assert c.values["worst_counts"] == -6528 + 100
@@ -375,8 +375,8 @@ class TestSharedDmiMerge:
         enc_r[500] -= 204                     # different place entirely
         checks = self.both_sides(enc_l, enc_r)
         assert "content.dmi_encoder" not in checks
-        assert checks["content.gocator_L_encoder"].severity is Severity.WARN
-        assert checks["content.gocator_R_encoder"].severity is Severity.WARN
+        assert checks["content.gocator_L_encoder"].severity is Severity.INFO
+        assert checks["content.gocator_R_encoder"].severity is Severity.INFO
 
     def test_one_clean_side_is_not_merged(self):
         enc_l = np.arange(1000, dtype=np.int64) * 102
@@ -384,7 +384,7 @@ class TestSharedDmiMerge:
         enc_l[946] -= 204                     # only the left misbehaves
         checks = self.both_sides(enc_l, enc_r)
         assert "content.dmi_encoder" not in checks
-        assert checks["content.gocator_L_encoder"].severity is Severity.WARN
+        assert checks["content.gocator_L_encoder"].severity is Severity.INFO
         assert checks["content.gocator_R_encoder"].severity is Severity.PASS
 
 
@@ -525,7 +525,9 @@ class TestGocatorSectionCoverage:
 
     def test_a_late_start_past_the_limit_warns_and_says_where(self):
         c = self._run(lead_m=2.4)          # 101313's right laser
-        assert c.severity is Severity.WARN
+        # INFO: a head-only loss is in the lead-in, trimmed downstream (2026-11-20)
+        assert c.severity is Severity.INFO
+        assert "trimmed downstream" in c.message
         assert c.values["lead_m"] == pytest.approx(2.4, abs=0.2)
         assert "at the start" in c.message
 
@@ -535,8 +537,8 @@ class TestGocatorSectionCoverage:
         section failed. The limit is a distance, so both are caught."""
         short = self._run(lead_m=2.4, run_m=30.0)
         long = self._run(lead_m=2.4, run_m=200.0)
-        assert short.severity is Severity.WARN
-        assert long.severity is Severity.WARN
+        assert short.severity is Severity.INFO
+        assert long.severity is Severity.INFO
         assert long.values["lead_m"] == pytest.approx(short.values["lead_m"], abs=0.3)
 
 

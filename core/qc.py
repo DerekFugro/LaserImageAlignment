@@ -295,7 +295,7 @@ def check_presence(run: disc.RunPaths, report: QCReport) -> list[str]:
     # actually catch a wrong pairing, and they run either way.
     if run.sbg_stamp and run.sbg_skew_s:
         report.add(
-            "presence.sbg_stamp_skew", "SBG log folder pairing", Severity.WARN,
+            "presence.sbg_stamp_skew", "SBG log folder pairing", Severity.INFO,  # a wrong pairing fails the match/PTP checks (2026-11-20)
             f"triggers and clock came from '{run.sbg_stamp}{disc.SBG_LOGGER_SUFFIX}', "
             f"{run.sbg_skew_s:+d} s from this run's stamp {run.run_id} — the logger "
             "and the collection system start their folders independently. Paired "
@@ -476,9 +476,10 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
                 "frames may be off - check this laser",
                 frame=suspect["first_frame"])
         if step and step.get("method") == "sensor clock":
+            # INFO, not WARN (Derek, 2026-11-20: if it does not change the data, do not flag it) - corrected
             report.add(
                 f"format.gocator_{side.lower()}_ptp_step", f"Gocator {side} PTP clock step",
-                Severity.WARN,
+                Severity.INFO,
                 f"{step['moved_rows']} of {step['n_rows']} profiles moved back onto the "
                 f"steady clock (up to {step['max_shift_ms']:.1f} ms, ~"
                 f"{step['max_shift_ms']:.0f} mm at 1 m/s) - the laser's PTP time stepped "
@@ -493,7 +494,7 @@ def parse_all(run: disc.RunPaths, report: QCReport) -> ParsedRun:
         elif step:
             report.add(
                 f"format.gocator_{side.lower()}_ptp_step", f"Gocator {side} PTP clock step",
-                Severity.WARN,
+                Severity.INFO,      # corrected (2026-11-20)
                 f"{step['moved_rows']} of {step['n_rows']} profiles moved by "
                 f"{abs(step['jump_us']) / 1000:.2f} ms (~{abs(step['jump_us']) / 1000:.0f} mm "
                 f"at 1 m/s) - the laser's PTP clock stepped back "
@@ -673,7 +674,8 @@ def check_acs_qc_video(pr: ParsedRun, report: QCReport,
                    "- its chainage is a count, booked against the end of the section.",
                    **vals)
     elif ours and not acs:
-        report.add(cid, name, Severity.WARN,
+        # INFO (2026-11-20): the hole itself is content.trigger_gap's WARN
+        report.add(cid, name, Severity.INFO,
                    f"this app found {len(ours)} trigger gap(s) totalling "
                    f"{our_len:.2f} m{where}, and ACS reports nothing missing for this "
                    "run. Either ACS cannot see it, or the gap is an artefact of the "
@@ -715,7 +717,7 @@ def merge_shared_dmi(report: QCReport) -> None:
     right = by_id.get("content.gocator_R_encoder")
     if left is None or right is None:
         return
-    if left.severity != Severity.WARN or right.severity != Severity.WARN:
+    if left.severity is Severity.PASS or right.severity is Severity.PASS:
         return
     le, re_ = left.values.get("drop_encoders"), right.values.get("drop_encoders")
     if not le or not re_ or set(le) != set(re_):
@@ -724,7 +726,7 @@ def merge_shared_dmi(report: QCReport) -> None:
         return
     merged = QCCheck(
         "content.dmi_encoder", "DMI encoder",
-        Severity.WARN,
+        left.severity,
         left.message.replace("wheel encoder", "wheel encoder (shared DMI)", 1)
         + " Seen identically on both lasers, which share the DMI feed, so this"
           " is one wheel event and not two faults.",
@@ -1255,8 +1257,10 @@ def check_content(pr: ParsedRun, report: QCReport,
                    + (f"; leaves {dupes} duplicate scan line(s) out of {len(goc)}."
                       if dupes else ".")
                    + scale_note)
+            # INFO (Derek, 2026-11-20): nothing moves - encoder health is a
+            # hardware question for the buggy's QC, not this report
             report.add(f"content.gocator_{side}_encoder", f"Gocator {side} encoder",
-                       Severity.WARN, msg,
+                       Severity.INFO, msg,
                        # The encoder is a health signal, not a position source.
                        # Whatever it does, the deliverable is untouched.
                        impact_pct=0.0, worst_defect_m=0.0,
@@ -1345,6 +1349,8 @@ def check_content(pr: ParsedRun, report: QCReport,
                 # costs the client nothing no matter how it measures. A loss at
                 # the TAIL is inside the section and is never free.
                 in_lead_in = bool(tail_m <= 0.01 and lead_m > 0.0)
+                if sev is Severity.WARN and in_lead_in:
+                    sev = Severity.INFO     # trimmed downstream (2026-11-20)
                 report.add(
                     f"content.gocator_{side}_coverage", f"Gocator {side} section coverage", sev,
                     (f"no profiles for {' and '.join(where)} of the run "

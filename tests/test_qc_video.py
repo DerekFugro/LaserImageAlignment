@@ -224,7 +224,8 @@ class TestCrossCheck:
     def test_we_saw_a_gap_and_acs_is_not_short(self, tmp_path):
         c = cross_check(collection(tmp_path, HEADER_ONLY),
                         triggers_with_gap(gap_at_m=327.0))
-        assert c.severity is Severity.WARN
+        # INFO (2026-11-20): the hole is content.trigger_gap's WARN already
+        assert c.severity is Severity.INFO
         assert "ACS reports nothing missing" in c.message
         assert c.values["our_len_m"] == pytest.approx(4.797, abs=0.01)
         assert "326 m into the run" in c.message           # we DO have the place
@@ -275,7 +276,7 @@ class TestCrossCheck:
         the run was clean, we called the 2.19 m pre-collection roll-up a
         dropout, and the disagreement was the bug - ours, not ACS's."""
         t = triggers_with_gap(gap_at_m=0.75, gap_m=2.19)
-        assert cross_check(collection(tmp_path, HEADER_ONLY), t).severity is Severity.WARN
+        assert cross_check(collection(tmp_path, HEADER_ONLY), t).severity is Severity.INFO
         c = cross_check(collection(tmp_path, HEADER_ONLY), t, n_recovered=1)
         assert c.severity is Severity.PASS
         assert c.values["n_ours"] == 0

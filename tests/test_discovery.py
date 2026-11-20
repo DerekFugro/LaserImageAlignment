@@ -164,7 +164,7 @@ def test_the_pairing_is_reported_so_it_is_never_silent(tmp_path):
     check_presence(runs["20260824.100258"], report)
 
     check = next(c for c in report.checks if c.check_id == "presence.sbg_stamp_skew")
-    assert check.severity == Severity.WARN
+    assert check.severity == Severity.INFO     # told, not flagged (2026-11-20)
     assert "20260824.100259" in check.message
 
 
