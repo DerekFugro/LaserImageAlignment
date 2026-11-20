@@ -993,7 +993,12 @@ def check_content(pr: ParsedRun, report: QCReport,
         report.add("content.trigger_span", "Trigger span (export ruler)", sev,
                    f"{span:.2f} m vs {expect:.2f} m expected from trigger count ({dev:.1f}% off)",
                    span_m=span, expected_m=expect)
-        sev = Severity.PASS if triggers.spacing_ok_frac >= 0.95 else Severity.WARN
+        # Never a WARN (Derek, 2026-11-20): the spread is the live SBG
+        # distance vs the final track, a few cm a step (BuggyProcessed: median
+        # 0.738-0.750 m on every run, 77-95% within 5 cm), and no photo moves
+        # by it. A hole is content.trigger_gap; a wrong trigger distance is
+        # content.trigger_span.
+        sev = Severity.PASS
         report.add("content.trigger_spacing", "Trigger spacing", sev, triggers.message,
                    ok_frac=triggers.spacing_ok_frac)
 

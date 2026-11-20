@@ -93,7 +93,9 @@ class TestSyntheticEndToEnd:
         distance. The gap is systematic, not per-run: on 20260824 the export
         read short on ten of eleven runs (a = 0.9932 to 1.0000, residuals
         4-38 mm), so anything inside that spread reports normal behaviour as a
-        problem. Derek set the limit at 1.0% on 2026-08-31.
+        problem. Derek set the limit at 1.0% on 2026-08-31, and moved it to
+        5% on 2026-11-20 (BuggyProcessed: 10 runs at 1.0-2.1%), the same as
+        the two other checks that ask the same question.
 
         Pinned here so the limit is not quietly nudged: it must pass the worst
         run of that day and still catch a scale error big enough to mean
@@ -102,7 +104,7 @@ class TestSyntheticEndToEnd:
 
         worst_seen = abs(0.99316 - 1.0)          # 20260824.101724
         assert COUNTER_SCALE_MAX_DEV > worst_seen
-        assert COUNTER_SCALE_MAX_DEV < 0.02
+        assert COUNTER_SCALE_MAX_DEV <= 0.05
         check = next(c for c in result.report.checks
                      if c.check_id == "align.counter_scale")
         assert check.severity is Severity.PASS

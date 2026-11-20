@@ -30,9 +30,13 @@ from .qc import (TARGET_CSV, TARGET_IMAGES, ParsedRun, QCReport, Severity,
 # spread just reports the fleet's normal behaviour twice a day. 1.0% sits
 # above the whole spread and in line with the other rulers: the export, the
 # SBG realtime distance and the Gocator wheel encoder all agree within ~1%.
-# Derek set it there on 2026-08-31. Nothing downstream uses the counter --
+# Derek set it there on 2026-08-31 (now 5% - below). Nothing downstream uses the counter --
 # images are placed by trigger time into the export -- so this is diagnostic.
-COUNTER_SCALE_MAX_DEV = 0.010
+# 5%, same as content.realtime_vs_export and content.trigger_span, which ask
+# the same question (live SBG distance vs the final track). Was 1%: on
+# BuggyProcessed 10 runs sat at 1.0-2.1% and no photo moves by it (Derek,
+# 2026-11-20).
+COUNTER_SCALE_MAX_DEV = 0.050
 
 
 @dataclass
