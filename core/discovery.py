@@ -384,8 +384,33 @@ def daily_stamps(root: Path, daily_path: Path | None = None) -> set[str] | None:
     """
     entries = _daily_entries(root, daily_path)
     if not entries:
-        return None
+        # a Daily that IS there and lists no run is not "no Daily": it says
+        # there is nothing to process (2026-11-20 - a header-only Daily made
+        # the batch check all 369 run folders of BuggyProcessed)
+        return set() if empty_daily(root, daily_path) else None
     return {rid for rid, e in entries.items() if not e.excluded}
+
+
+def empty_daily(root: Path, daily_path: Path | None = None) -> Path | None:
+    """The Daily file, when there is one, it reads, and it lists no run at
+    all (headers only - the crew copied the wrong file on 20261013). Callers
+    refuse to run on it rather than fall back to every folder on disk."""
+    from .daily import find_daily_file, parse_daily
+    path = find_daily_file(Path(root), daily_path)
+    if path is None or not Path(path).is_file():
+        return None
+    try:
+        return Path(path) if not parse_daily(path) else None
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _day_of(daily_path: Path | None) -> str | None:
+    """YYYYMMDD of the day folder a chosen Daily file sits in, or None."""
+    if daily_path is None:
+        return None
+    m = re.fullmatch(r"\d{8}", Path(daily_path).parent.name)
+    return m.group(0) if m else None
 
 
 def discover_runs(root: Path, calibrations_dir: Path | None = None,
@@ -421,8 +446,13 @@ def discover_runs(root: Path, calibrations_dir: Path | None = None,
     camera_logs = cameralog.find_logs(root)
     runs: list[RunPaths] = []
     stamps, paired, sbg_dirs = _run_stamps_and_loggers(root)
+    # A Daily was chosen for one day but cannot be read (missing): still only
+    # that day's folders, never every day on the drive (2026-11-20)
+    day_only = _day_of(daily_path) if registered is None and registered_only else None
     for stamp in stamps:
         if registered is not None and stamp not in registered:
+            continue
+        if day_only and not stamp.startswith(day_only):
             continue
         date, time = stamp.split(".")
         p: dict[str, Path | None] = {}

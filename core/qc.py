@@ -624,7 +624,7 @@ def check_acs_qc_video(pr: ParsedRun, report: QCReport,
     from .daily import find_qc_video_file, read_qc_video, video_gaps_for_run
 
     cid, name = "content.acs_qc_video", "ACS QC_Video cross-check"
-    path = find_qc_video_file(Path(pr.run.root))
+    path = find_qc_video_file(Path(pr.run.root), pr.run.run_id)
     if path is None:
         # NOT a pass. "ACS reports no missing images" and "ACS never told us"
         # are different statements and must not print the same.

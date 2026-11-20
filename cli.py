@@ -159,6 +159,11 @@ def cmd_runs(args) -> int:
     root = Path(args.collection)
     cal = Path(args.calibrations) if args.calibrations else None
     daily = _daily(args)
+    empty = disc.empty_daily(root, daily)
+    if empty is not None:
+        _reason(f"the ACS Daily file {empty} lists no runs (empty, or the wrong "
+                "file?) - nothing would be processed")
+        return EXIT_CANNOT_RUN
     on_disk = {r.run_id for r in disc.discover_runs(root, calibrations_dir=cal,
                                                     registered_only=False,
                                                     daily_path=daily)}
@@ -199,6 +204,11 @@ def cmd_check(args) -> int:
     daily = _daily(args)
     for note in _apply_locates(store, root, args.locate, cal):
         print(note)
+    empty = disc.empty_daily(root, daily)
+    if empty is not None:
+        _reason(f"the ACS Daily file {empty} lists no runs (empty, or the wrong "
+                "file?) - nothing to check")
+        return EXIT_CANNOT_RUN
     rep = preflight(root, calibrations_dir=cal, overrides=store,
                     daily_path=daily)
     if not rep.runs:
@@ -236,6 +246,10 @@ def cmd_process(args) -> int:
         progress=_progress(args.quiet),
         daily_path=daily,
     )
+    if report.aborted and not report.outcomes:
+        print(report.to_text())
+        write_reports(report)
+        return _process_exit(report, {})
     if not report.outcomes and not report.excluded and not report.ignored:
         print(f"no runs found under {root}", file=sys.stderr)
         return EXIT_CANNOT_RUN

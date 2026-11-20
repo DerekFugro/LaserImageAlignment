@@ -51,6 +51,15 @@ class DailyEntry:
     # still KEPT so the run is reported as what it is - in the Daily, not
     # readable - and never as "no row in the Daily" (2026-10-20).
     problem: str = ""
+    comments: str = ""    # Comments column, verbatim
+
+    @property
+    def added_by_orchestrator(self) -> bool:
+        """A row the pipeline orchestrator added for a run folder the crew's
+        Daily left out (Daily_FILLED_<day>.csv, 2026-11-19). Its start/end
+        GPS come from the run's own nav.txt, so the Daily-start check can
+        prove nothing for it and is not made."""
+        return self.comments.strip().lower().startswith("added by orchestrator")
 
     @property
     def has_start_point(self) -> bool:
@@ -184,6 +193,7 @@ def parse_daily(path: Path) -> dict[str, DailyEntry]:
                 lon_beg=num("LongBeg", blank_ok=True),
                 status=str(row.get("Status") or "").strip(),
                 problem="; ".join(problems),
+                comments=str(row.get("Comments") or "").strip(),
             )
     return out
 
@@ -238,8 +248,16 @@ class VideoGap:
         return self.end_m - self.begin_m
 
 
-def find_qc_video_file(root: Path) -> Path | None:
-    """<root>/<YYYYMMDD>/QC_Video.csv, or None."""
+def find_qc_video_file(root: Path, run_id: str | None = None) -> Path | None:
+    """<root>/<YYYYMMDD>/QC_Video.csv for the run's own day, or None.
+
+    Until 2026-11-20 this took the FIRST day's file in the collection, so on a
+    multi-day collection (BuggyProcessed, Oct 13-17) every day's runs were
+    checked against Oct 13's QC_Video.csv. Without a run_id (old callers) the
+    old behaviour stands."""
+    if run_id:
+        p = Path(root) / str(run_id)[:8] / QC_VIDEO_NAME
+        return p if p.is_file() else None
     hits = sorted(Path(root).glob(f"*/{QC_VIDEO_NAME}"))
     return hits[0] if hits else None
 

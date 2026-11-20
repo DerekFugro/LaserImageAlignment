@@ -426,6 +426,19 @@ class BatchReport:
         if self.dry_run:
             return ("DRY RUN — nothing was written into the collection. This "
                     "report says what WOULD have happened.\n")
+        skipped = [o for o in self.outcomes if o.status == "skipped"]
+        if self.aborted and not self.outcomes:
+            return ("AFFECTED COLLECTION: nothing was processed or written - "
+                    f"{self.abort_reason}.\n")
+        if not rows and skipped:
+            # skipped runs never reach affected_rows; "none - every
+            # deliverable was written" after writing 0 of 369 (20261013) was
+            # untrue (2026-11-20)
+            done = len(self.outcomes) - len(skipped)
+            return (f"AFFECTED COLLECTION: {len(skipped)} run(s) skipped before "
+                    "processing - nothing in them was written (see SKIPPED)"
+                    + (f"; the {done} run(s) processed got every deliverable.\n"
+                       if done else "; nothing was written.\n"))
         if not rows:
             return "AFFECTED COLLECTION: none — every deliverable was written.\n"
         lines = ["AFFECTED COLLECTION — these deliverables were NOT written:", ""]
@@ -903,6 +916,15 @@ def process_collection(root: Path, calibrations_dir: Path | None = None,
         write_csv=write_csv,
         daily_path=str(daily_path) if daily_path else "",
     )
+    # A Daily that lists no run at all is refused, not read as "no Daily"
+    # (20261013, BuggyProcessed: a header-only file made this check all 369
+    # run folders on the drive and write none). Nothing is touched.
+    empty = disc.empty_daily(root, daily_path)
+    if empty is not None:
+        report.aborted = True
+        report.abort_reason = (f"the ACS Daily file {empty} lists no runs (empty, or "
+                               "the wrong file?) - nothing processed")
+        return report
     # BEFORE anything reads the folders: put back any image a killed batch
     # left under a temporary name. A temp file does not match *.jpg, so the
     # scan would see fewer images than the run has triggers and the matcher
@@ -1181,7 +1203,12 @@ def _rename_to_section_distance(root: Path, report: BatchReport) -> None:
         if res.camera_alignments:
             any_al = next(iter(res.camera_alignments.values()))
             miss = daily_start_miss_m(any_al, nav, entry, start_utc)
-            if not entry.has_start_point:
+            if getattr(entry, "added_by_orchestrator", False):
+                o.notes.append(
+                    "daily start: row added by the orchestrator from this run's own "
+                    "data (not in the crew's Daily) - the Daily-start check proves "
+                    "nothing for it and was not made")
+            elif not entry.has_start_point:
                 o.notes.append(
                     "daily start: the ACS Daily row has no section-start point "
                     "(LatBeg/LongBeg blank) - names count from the session start "
