@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import csv
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -423,6 +423,9 @@ class NavTable:
     path: str = ""
     vel_h_ms: np.ndarray | None = None   # horizontal speed from N/E velocity columns
     n_dropped_nofix: int = 0             # (0,0) placeholder rows removed at parse
+    # ...and WHEN they were (UTC epoch s), so a run can tell whether one sits
+    # under it - the count is the whole session's, not this run's
+    nofix_epoch_s: np.ndarray = field(default_factory=lambda: np.empty(0))
     # along-track ruler, filled in __post_init__
     along_m: np.ndarray | None = None
     speed_ms: np.ndarray | None = None
@@ -566,6 +569,7 @@ class NavTable:
             lat_deg=arr["lat"][good], lon_deg=arr["lon"][good], alt_m=arr["alt"][good],
             yaw_deg=arr["yaw"][good], gps_tow_s=arr["gps"][good], path=str(path),
             vel_h_ms=arr["velh"][good], n_dropped_nofix=n_dropped,
+            nofix_epoch_s=epoch[keep & ~on_site],
         )
         if not np.all(np.diff(table.epoch_s) > 0):
             raise ParseError(path, "export UTC times are not strictly increasing after rollover handling")

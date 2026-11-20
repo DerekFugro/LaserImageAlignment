@@ -1346,10 +1346,31 @@ def check_content(pr: ParsedRun, report: QCReport,
     # Nav export checks
     if pr.nav is not None:
         if pr.nav.n_dropped_nofix:
-            report.add("content.nav_nofix", "Nav no-fix rows", Severity.WARN,
-                       f"{pr.nav.n_dropped_nofix} unconverged position row(s) dropped "
-                       "from the export — check they do not fall under a run",
-                       n_dropped=pr.nav.n_dropped_nofix)
+            # The count is the whole SESSION's (one export file), so it used to
+            # WARN on every run of the session - 56 runs on BuggyProcessed
+            # Oct 14-15 - while the rows sat at the session's start or end.
+            # WARN only when one is inside this run's trigger span (Derek,
+            # 2026-11-20); a gap that matters is also caught by content.nav_gap.
+            when = np.asarray(getattr(pr.nav, "nofix_epoch_s", np.empty(0)), dtype=float)
+            inside = np.empty(0)
+            if triggers is not None and len(triggers.utc_s) and len(when):
+                lo, hi = float(triggers.utc_s[0]), float(triggers.utc_s[-1])
+                inside = when[(when >= lo) & (when <= hi)]
+            if len(inside):
+                from datetime import datetime, timezone
+                shown = ", ".join(datetime.fromtimestamp(t, tz=timezone.utc).strftime("%H:%M:%S.%f")[:-4]
+                                  for t in inside[:5])
+                report.add("content.nav_nofix", "Nav no-fix rows", Severity.WARN,
+                           f"{len(inside)} unconverged position row(s) dropped from the "
+                           f"export INSIDE this run (UTC {shown}"
+                           f"{' ...' if len(inside) > 5 else ''}) - the track has a "
+                           "hole there; photos near it are placed across the gap",
+                           n_dropped=int(len(inside)), n_session=pr.nav.n_dropped_nofix)
+            else:
+                report.add("content.nav_nofix", "Nav no-fix rows", Severity.INFO,
+                           f"{pr.nav.n_dropped_nofix} unconverged position row(s) dropped "
+                           "from the session's export, none inside this run",
+                           n_dropped=0, n_session=pr.nav.n_dropped_nofix)
         gap = pr.nav.max_gap_s
         sev = Severity.PASS if gap <= 1.0 else Severity.WARN
         report.add("content.nav_gap", "Nav export continuity", sev,

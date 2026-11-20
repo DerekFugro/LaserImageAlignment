@@ -170,6 +170,9 @@ class TestNavTable:
         nav = NavTable.parse(p, anchor_utc_date=self.anchor())
         assert nav.n_dropped_nofix == 1
         assert not np.any(nav.lat_deg == 0.0)
+        # and WHEN it was, so QC can tell whether it sits under a run
+        assert len(nav.nofix_epoch_s) == 1
+        assert nav.nofix_epoch_s[0] == pytest.approx(nav.epoch_s[3] + 1.0)
 
     def test_a_tiny_export_is_never_trimmed_away(self, tmp_path):
         """Two rows is a fixture or a broken file, not a survey — trimming
