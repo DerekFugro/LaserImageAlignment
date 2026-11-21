@@ -87,6 +87,22 @@ class TestAlignmentCsvNamesTheFilesOnDisk:
         assert renamed, "this run renames images, so the two columns must differ"
         assert all(r["image_file"].endswith(".jpg") for r in rows)
 
+    def test_a_rerun_still_gives_the_acs_name(self, done, synth_cal_dir, tmp_path):
+        """A re-run processes the images under the names the first run gave
+        them. `image_file` has to stay what ACS called the file, or anything
+        holding the ACS names loses the row after a re-run (Derek,
+        2026-11-21). The positions and final names must not move either."""
+        root, report, _ = done
+        o = next(x for x in report.outcomes if x.run_id == RUN_ID)
+        first = list(csv.DictReader(open(o.csv_path, newline="", encoding="utf-8")))
+        again = process_collection(root, calibrations_dir=synth_cal_dir,
+                                   overrides=OverrideStore(tmp_path / "ov.json"))
+        o2 = next(x for x in again.outcomes if x.run_id == RUN_ID)
+        second = list(csv.DictReader(open(o2.csv_path, newline="", encoding="utf-8")))
+        assert len(second) == len(first)
+        assert any(r["image_file"] != r["image_file_final"] for r in second)
+        assert second == first
+
     def test_section_and_distance_travel_with_the_row(self, done):
         """The number in the new filename has to be readable as a number,
         not only parsed back out of the name."""

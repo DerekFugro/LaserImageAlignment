@@ -635,8 +635,10 @@ def _recover_pre_collection_triggers(parsed, report) -> tuple[np.ndarray, int]:
 
 
 EXPORT_COLUMNS = [
-    # `image_file` is the name the run was PROCESSED under; `image_file_final`
-    # is what the file is called on disk once the batch has renamed it to its
+    # `image_file` is what ACS called the file - always, on a re-run too
+    # (2026-11-21: it used to be the name the run was processed under, which
+    # on a re-run is the LAST run's name). `image_file_final` is what the
+    # file is called on disk once the batch has renamed it to its
     # section distance. They differ on every run, because the rename is the
     # last step of the batch and needs the positions computed here first.
     # Without the second column this table names files that do not exist:
@@ -892,6 +894,13 @@ def export_csv(result: RunResult, out_path: Path, rename_info: dict | None = Non
             dists = list(getattr(ren, "distances_mm", []) or [])
             aside = ren.set_aside() if ren is not None else []
             section = getattr(ren, "section", "") or ""
+            # ACS's own name for each file, from the rename record. On a re-run
+            # the images were processed under last run's names; the manifest
+            # follows every rename back to the original (true_origins).
+            origin = {}
+            if getattr(ren, "manifest_path", ""):
+                from .rename import true_origins
+                origin = true_origins(Path(ren.manifest_path).parent)
             dups = getattr(result, "duplicates", {}).get(cam_name, {})
             gap, status = _gaps_and_status(al, getattr(result, "estimated_spans", {}).get(cam_name),
                                            dups)
@@ -915,8 +924,10 @@ def export_csv(result: RunResult, out_path: Path, rename_info: dict | None = Non
                 # the run was processed under
                 final = finals[j] if j < len(finals) else al.images.files[j]
                 sec_mm = dists[j] if j < len(dists) else float("nan")
+                processed = al.images.files[j]
+                acs = origin.get(final) or origin.get(processed) or processed
                 w.writerow([
-                    al.images.files[j], final,
+                    acs, final,
                     (aside[j] if j < len(aside) else False),
                     cam_name, result.run.run_id, j,
                     i if matched else "", matched, utc_iso,
